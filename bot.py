@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 from telegram import InlineKeyboardButton as Btn, InlineKeyboardMarkup as Kb, Update
 from telegram.error import Forbidden, BadRequest, RetryAfter
 from telegram.ext import (Application, CallbackQueryHandler, CommandHandler,
-                          ContextTypes)
+                          ContextTypes, MessageHandler, filters)
 
 import texts as T
 from db import DB
@@ -59,7 +59,7 @@ def main_menu():
         [Btn(T.BTN_WEBINAR, callback_data="webinar")],
         [Btn(T.BTN_KIT, callback_data="kit")],
         [Btn(T.BTN_CHANNEL, url=CHANNEL_URL)],
-        [Btn(T.BTN_QUESTION, url=DIRECT_URL)],
+        [Btn(T.BTN_QUESTION, callback_data="ask")],
     ])
 
 
@@ -105,6 +105,9 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await show_kit(update.effective_chat.id, u.id, ctx)
     if source == "webinar":  # ссылка t.me/ritm_goda_bot?start=webinar сразу ведёт к записи
         await show_webinar(update.effective_chat.id, ctx)
+    if source == "vopros":  # ссылка t.me/ritm_goda_bot?start=vopros сразу открывает вопрос
+        ctx.user_data["asking"] = True
+        await ctx.bot.send_message(update.effective_chat.id, T.ASK_PROMPT)
 
 
 async def on_guide(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -160,7 +163,7 @@ async def show_kit(chat_id, uid, ctx):
         if url:
             rows.append([Btn(label, url=pay_url(url, uid))])
     text = T.KIT_INFO if rows else T.KIT_INFO + "\n\n" + T.KIT_SOON
-    rows.append([Btn(T.BTN_QUESTION, url=DIRECT_URL)])
+    rows.append([Btn(T.BTN_QUESTION, callback_data="ask")])
     await ctx.bot.send_message(chat_id, text, reply_markup=Kb(rows))
 
 
@@ -409,6 +412,69 @@ async def post_shutdown(app: Application):
     await db.close()
 
 
+# ---------- вопросы через бота ----------
+ASK_TAG = "id:"
+
+
+async def on_ask(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    ctx.user_data["asking"] = True
+    await ctx.bot.send_message(q.message.chat_id, T.ASK_PROMPT)
+
+
+async def on_private_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Сообщения людей пересылаются администраторам; ответ администратора уходит человеку."""
+    msg = update.effective_message
+    u = update.effective_user
+    if u.id in ADMIN_IDS and msg.reply_to_message:
+        await admin_reply(update, ctx)
+        return
+    if u.id in ADMIN_IDS and not ctx.user_data.get("asking"):
+        await msg.reply_text(T.ADMIN_REPLY_HINT)
+        return
+    await db.upsert_user(u.id, u.first_name, u.username)
+    who = u.first_name or ""
+    if u.username:
+        who += f" (@{u.username})"
+    header = T.ASK_HEADER.format(who=who, tag=f"{ASK_TAG}{u.id}")
+    sent_any = False
+    for admin in ADMIN_IDS:
+        try:
+            h = await ctx.bot.send_message(admin, header)
+            c = await ctx.bot.copy_message(admin, msg.chat_id, msg.message_id, reply_to_message_id=h.message_id)
+            ctx.bot_data.setdefault("ask_map", {})[(admin, h.message_id)] = u.id
+            ctx.bot_data["ask_map"][(admin, c.message_id)] = u.id
+            sent_any = True
+        except (Forbidden, BadRequest) as e:
+            log.warning("Не удалось переслать вопрос администратору %s: %s", admin, e)
+    if ctx.user_data.pop("asking", False) or not ctx.user_data.get("ask_confirmed"):
+        ctx.user_data["ask_confirmed"] = True
+        await msg.reply_text(T.ASK_THANKS if sent_any else T.ASK_FAILED)
+
+
+async def admin_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    r = msg.reply_to_message
+    uid = ctx.bot_data.get("ask_map", {}).get((msg.chat_id, r.message_id))
+    if uid is None:
+        text = (r.text or r.caption or "")
+        if ASK_TAG in text:
+            try:
+                uid = int(text.split(ASK_TAG, 1)[1].split()[0])
+            except ValueError:
+                uid = None
+    if uid is None:
+        await msg.reply_text(T.ADMIN_REPLY_HINT)
+        return
+    try:
+        await ctx.bot.send_message(uid, T.ANSWER_HEADER)
+        await ctx.bot.copy_message(uid, msg.chat_id, msg.message_id)
+        await msg.reply_text(T.ANSWER_SENT)
+    except Forbidden:
+        await msg.reply_text(T.ANSWER_BLOCKED)
+
+
 def build_app() -> Application:
     app = (Application.builder().token(BOT_TOKEN)
            .post_init(post_init).post_shutdown(post_shutdown).build())
@@ -425,6 +491,8 @@ def build_app() -> Application:
     app.add_handler(CallbackQueryHandler(on_register, pattern="^reg:"))
     app.add_handler(CallbackQueryHandler(on_unregister, pattern="^unreg:"))
     app.add_handler(CallbackQueryHandler(on_broadcast_confirm, pattern="^bc:"))
+    app.add_handler(CallbackQueryHandler(on_ask, pattern="^ask$"))
+    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, on_private_message))
     app.add_error_handler(on_error)
     app.job_queue.run_repeating(reminder_job, interval=60, first=10)
     return app
