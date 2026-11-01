@@ -34,8 +34,9 @@ ADMIN_IDS = {int(x) for x in os.environ.get("ADMIN_IDS", "").replace(" ", "").sp
 CHANNEL_URL = os.environ.get("CHANNEL_URL", "https://t.me/ritm_goda")
 DIRECT_URL = os.environ.get("DIRECT_URL", "https://t.me/ritm_goda?direct")
 PRIVACY_URL = os.environ.get("PRIVACY_URL", "")
-PAY_URL_FULL = os.environ.get("PAY_URL_FULL", "")  # Stripe Payment Link: комплект + консультация
-PAY_URL_KIT = os.environ.get("PAY_URL_KIT", "")    # Stripe Payment Link: только комплект
+PAY_URL_KIT = os.environ.get("PAY_URL_KIT", "")    # Stripe Payment Link: только план
+PAY_URL_FULL = os.environ.get("PAY_URL_FULL", "")  # Stripe Payment Link: план + консультация
+PAY_URL_PLUS = os.environ.get("PAY_URL_PLUS", "")  # Stripe Payment Link: план + консультация + сопровождение
 
 db = DB(DATABASE_URL)
 
@@ -154,10 +155,10 @@ def pay_url(base, uid):
 
 async def show_kit(chat_id, uid, ctx):
     rows = []
-    if PAY_URL_FULL:
-        rows.append([Btn(T.BTN_BUY_FULL, url=pay_url(PAY_URL_FULL, uid))])
-    if PAY_URL_KIT:
-        rows.append([Btn(T.BTN_BUY_KIT, url=pay_url(PAY_URL_KIT, uid))])
+    for url, label in ((PAY_URL_KIT, T.BTN_BUY_KIT), (PAY_URL_FULL, T.BTN_BUY_FULL),
+                       (PAY_URL_PLUS, T.BTN_BUY_PLUS)):
+        if url:
+            rows.append([Btn(label, url=pay_url(url, uid))])
     text = T.KIT_INFO if rows else T.KIT_INFO + "\n\n" + T.KIT_SOON
     rows.append([Btn(T.BTN_QUESTION, url=DIRECT_URL)])
     await ctx.bot.send_message(chat_id, text, reply_markup=Kb(rows))
