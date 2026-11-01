@@ -104,6 +104,10 @@ class DB:
             """SELECT w.*, (SELECT count(*) FROM registrations r WHERE r.webinar_id=w.id) AS regs
                FROM webinars w ORDER BY starts_at""")
 
+    async def upcoming_webinars(self, limit=8):
+        return await self.pool.fetch(
+            "SELECT * FROM webinars WHERE starts_at > now() ORDER BY starts_at LIMIT $1", limit)
+
     async def next_webinar(self):
         return await self.pool.fetchrow(
             "SELECT * FROM webinars WHERE starts_at > now() ORDER BY starts_at LIMIT 1")

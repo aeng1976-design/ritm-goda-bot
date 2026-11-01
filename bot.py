@@ -34,6 +34,8 @@ ADMIN_IDS = {int(x) for x in os.environ.get("ADMIN_IDS", "").replace(" ", "").sp
 CHANNEL_URL = os.environ.get("CHANNEL_URL", "https://t.me/ritm_goda")
 DIRECT_URL = os.environ.get("DIRECT_URL", "https://t.me/ritm_goda?direct")
 PRIVACY_URL = os.environ.get("PRIVACY_URL", "")
+PAY_URL_FULL = os.environ.get("PAY_URL_FULL", "")  # Stripe Payment Link: комплект + консультация
+PAY_URL_KIT = os.environ.get("PAY_URL_KIT", "")    # Stripe Payment Link: только комплект
 
 db = DB(DATABASE_URL)
 
@@ -54,6 +56,7 @@ def main_menu():
     return Kb([
         [Btn(T.BTN_GUIDE, callback_data="guide")],
         [Btn(T.BTN_WEBINAR, callback_data="webinar")],
+        [Btn(T.BTN_KIT, callback_data="kit")],
         [Btn(T.BTN_CHANNEL, url=CHANNEL_URL)],
         [Btn(T.BTN_QUESTION, url=DIRECT_URL)],
     ])
@@ -97,6 +100,8 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_photo(f, caption=caption, reply_markup=main_menu())
     else:
         await update.message.reply_text(caption, reply_markup=main_menu())
+    if source == "kit":  # ссылка t.me/ritm_goda_bot?start=kit сразу ведёт к покупке
+        await show_kit(update.effective_chat.id, u.id, ctx)
     if source == "webinar":  # ссылка t.me/ritm_goda_bot?start=webinar сразу ведёт к записи
         await show_webinar(update.effective_chat.id, ctx)
 
@@ -123,14 +128,47 @@ async def on_consent(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def show_webinar(chat_id, ctx):
-    w = await db.next_webinar()
-    if not w:
+    ws = await db.upcoming_webinars()
+    if not ws:
         await ctx.bot.send_message(chat_id, T.NO_WEBINAR,
                                    reply_markup=Kb([[Btn(T.BTN_CHANNEL, url=CHANNEL_URL)]]))
         return
-    text = T.WEBINAR_INFO.format(title=w["title"], **fmt_times(w["starts_at"]))
-    await ctx.bot.send_message(chat_id, text, reply_markup=Kb([
-        [Btn(T.BTN_REGISTER, callback_data=f"reg:{w['id']}")]]))
+    lines, rows = [], []
+    for w in ws:
+        b = w["starts_at"].astimezone(BERLIN)
+        t = fmt_times(w["starts_at"])
+        extra = "" if w["title"] == T.DEFAULT_TITLE else f" · «{w['title']}»"
+        lines.append(T.WEBINAR_LINE.format(wd=T.WEEKDAYS[b.weekday()], day=b.day, month=T.MONTHS[b.month],
+                                           title=extra, **{k: t[k] for k in ("time_berlin", "time_msk")}))
+        rows.append([Btn(T.WEBINAR_BTN.format(wd_short=T.WD_SHORT[b.weekday()], dm=b.strftime("%d.%m"),
+                                              time_berlin=t["time_berlin"]), callback_data=f"reg:{w['id']}")])
+    await ctx.bot.send_message(chat_id, T.WEBINAR_INFO.format(dates="\n".join(lines)),
+                               reply_markup=Kb(rows))
+
+
+def pay_url(base, uid):
+    """Добавляет Telegram ID к ссылке Stripe, чтобы в оплате было видно, кто купил."""
+    sep = "&" if "?" in base else "?"
+    return f"{base}{sep}client_reference_id=tg{uid}"
+
+
+async def show_kit(chat_id, uid, ctx):
+    rows = []
+    if PAY_URL_FULL:
+        rows.append([Btn(T.BTN_BUY_FULL, url=pay_url(PAY_URL_FULL, uid))])
+    if PAY_URL_KIT:
+        rows.append([Btn(T.BTN_BUY_KIT, url=pay_url(PAY_URL_KIT, uid))])
+    text = T.KIT_INFO if rows else T.KIT_INFO + "\n\n" + T.KIT_SOON
+    rows.append([Btn(T.BTN_QUESTION, url=DIRECT_URL)])
+    await ctx.bot.send_message(chat_id, text, reply_markup=Kb(rows))
+
+
+async def on_kit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    u = q.from_user
+    await db.upsert_user(u.id, u.first_name, u.username)
+    await show_kit(q.message.chat_id, u.id, ctx)
 
 
 async def on_webinar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -143,12 +181,19 @@ async def on_register(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     wid = int(q.data.split(":")[1])
+    w = await db.get_webinar(wid)
+    if not w:
+        await ctx.bot.send_message(q.message.chat_id, T.NO_WEBINAR)
+        return
     u = q.from_user
     await db.upsert_user(u.id, u.first_name, u.username)
     new = await db.register(u.id, wid)
     await q.edit_message_reply_markup(None)
-    await ctx.bot.send_message(q.message.chat_id, T.REGISTERED if new else T.ALREADY_REGISTERED,
+    t = fmt_times(w["starts_at"])
+    text = (T.REGISTERED if new else T.ALREADY_REGISTERED).format(title=w["title"], **t)
+    await ctx.bot.send_message(q.message.chat_id, text,
                                reply_markup=Kb([[Btn(T.BTN_UNREGISTER, callback_data=f"unreg:{wid}")],
+                                                [Btn(T.BTN_WEBINAR, callback_data="webinar")],
                                                 [Btn(T.BTN_CHANNEL, url=CHANNEL_URL)]]))
 
 
@@ -374,6 +419,7 @@ def build_app() -> Application:
         app.add_handler(CommandHandler(name, fn))
     app.add_handler(CallbackQueryHandler(on_guide, pattern="^guide$"))
     app.add_handler(CallbackQueryHandler(on_webinar, pattern="^webinar$"))
+    app.add_handler(CallbackQueryHandler(on_kit, pattern="^kit$"))
     app.add_handler(CallbackQueryHandler(on_consent, pattern="^consent:"))
     app.add_handler(CallbackQueryHandler(on_register, pattern="^reg:"))
     app.add_handler(CallbackQueryHandler(on_unregister, pattern="^unreg:"))
