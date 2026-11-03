@@ -155,6 +155,9 @@ async def send_guide12(chat_id, ctx):
         return False
     try:
         await ctx.bot.send_document(chat_id, fid, caption=T.GUIDE12_CAPTION)
+        pid = await db.get_setting("guide12print_file_id")
+        if pid:
+            await ctx.bot.send_document(chat_id, pid, caption=T.PRINT_CAPTION)
         return True
     except Exception as e:
         log.warning("Не удалось отправить гайд 12 дней: %s", e)
@@ -184,9 +187,13 @@ async def on_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await on_private_message(update, ctx)  # обычный человек: подсказка про директ
         return
     m = update.effective_message
-    if m.document and (m.caption or "").strip().lower() == "guide12":
+    cap = (m.caption or "").strip().lower()
+    if m.document and cap == "guide12":
         await db.set_setting("guide12_file_id", m.document.file_id)
         await m.reply_text(T.GUIDE12_SAVED)
+    elif m.document and cap == "guide12print":
+        await db.set_setting("guide12print_file_id", m.document.file_id)
+        await m.reply_text(T.GUIDE12P_SAVED)
 
 
 async def on_consult_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -232,6 +239,11 @@ async def on_guide(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     with (FILES / "gayd_lichnyy_god_2027.pdf").open("rb") as f:
         await ctx.bot.send_document(q.message.chat_id, f, filename="Гайд Личный год 2027.pdf",
                                     caption=T.GUIDE_CAPTION)
+    pr = FILES / "gayd_lichnyy_god_2027_pechat.pdf"
+    if pr.exists():
+        with pr.open("rb") as f:
+            await ctx.bot.send_document(q.message.chat_id, f, filename="Гайд Личный год 2027 для печати.pdf",
+                                        caption=T.PRINT_CAPTION)
     user = await db.get_user(q.from_user.id)
     if user and user["news_consent"] is None:
         await ctx.bot.send_message(q.message.chat_id, T.ASK_CONSENT, reply_markup=Kb([[
