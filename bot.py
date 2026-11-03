@@ -148,18 +148,45 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                                    reply_markup=Kb([[Btn(T.BTN_QUESTION, url=DIRECT_URL)]]))
 
 
+async def send_guide12(chat_id, ctx):
+    """Подарок после оплаты: гайд «12 дней». Файл хранится в Telegram (file_id), не в репозитории."""
+    fid = await db.get_setting("guide12_file_id")
+    if not fid:
+        return False
+    try:
+        await ctx.bot.send_document(chat_id, fid, caption=T.GUIDE12_CAPTION)
+        return True
+    except Exception as e:
+        log.warning("Не удалось отправить гайд 12 дней: %s", e)
+        return False
+
+
 async def show_paid(chat_id, u, source, ctx):
     await notify_admins(ctx, f"💳 После оплаты зашёл(зашла) в бота: {who(u)}\n"
                              f"Тариф: {PAID_SOURCES[source]} · Telegram ID: {u.id}\n"
                              f"(в Stripe это client_reference_id tg{u.id}; проверьте оплату)")
     if source == "plan":
         await ctx.bot.send_message(chat_id, T.PAID_PLAN)
+    else:
+        text = T.CONSULT_ASK.format(plus=T.CONSULT_PLUS if source == "soprov" else "")
+        await ctx.bot.send_message(chat_id, text, reply_markup=Kb([
+            [Btn(T.BTN_CONS_ALEX, callback_data=f"cons:{source}:alex"),
+             Btn(T.BTN_CONS_LUDA, callback_data=f"cons:{source}:luda")],
+            [Btn(T.BTN_CONS_ANY, callback_data=f"cons:{source}:any")]]))
+    if not await send_guide12(chat_id, ctx):
+        await notify_admins(ctx, f"⚠️ Гайд «12 дней» не отправлен ({who(u)}): файл не загружен в бота. "
+                                 "Отправьте боту PDF с подписью guide12 и перешлите покупателю вручную.")
+
+
+async def on_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Администратор отправляет боту PDF с подписью guide12: бот запоминает файл."""
+    if not is_admin(update):
+        await on_private_message(update, ctx)  # обычный человек: подсказка про директ
         return
-    text = T.CONSULT_ASK.format(plus=T.CONSULT_PLUS if source == "soprov" else "")
-    await ctx.bot.send_message(chat_id, text, reply_markup=Kb([
-        [Btn(T.BTN_CONS_ALEX, callback_data=f"cons:{source}:alex"),
-         Btn(T.BTN_CONS_LUDA, callback_data=f"cons:{source}:luda")],
-        [Btn(T.BTN_CONS_ANY, callback_data=f"cons:{source}:any")]]))
+    m = update.effective_message
+    if m.document and (m.caption or "").strip().lower() == "guide12":
+        await db.set_setting("guide12_file_id", m.document.file_id)
+        await m.reply_text(T.GUIDE12_SAVED)
 
 
 async def on_consult_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -623,6 +650,7 @@ def build_app() -> Application:
     app.add_handler(CallbackQueryHandler(on_review_write, pattern="^rvwrite$"))
     app.add_handler(CallbackQueryHandler(on_consult_choice, pattern="^cons:"))
     app.add_handler(ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
+    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.Document.ALL, on_document))
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, on_private_message))
     app.add_error_handler(on_error)
     app.job_queue.run_repeating(reminder_job, interval=60, first=10)
