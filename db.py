@@ -62,7 +62,10 @@ class DB:
         self.pool = None
 
     async def connect(self):
-        self.pool = await asyncpg.create_pool(self.url, min_size=1, max_size=5)
+        # min_size=0 и закрытие простаивающих соединений через 60 с: база Neon может «заснуть»
+        # через 5 минут без запросов, и у бота не остаётся «мёртвых» соединений
+        self.pool = await asyncpg.create_pool(self.url, min_size=0, max_size=5,
+                                              max_inactive_connection_lifetime=60)
         async with self.pool.acquire() as c:
             await c.execute(SCHEMA)
 

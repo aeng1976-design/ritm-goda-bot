@@ -8,7 +8,7 @@
 import asyncio
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -141,6 +141,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if source in ("efir", "otzyv"):  # ссылка на отзыв (в чат Zoom после эфира или для остальных)
         if source == "efir":
             await db.mark_attended(u.id)
+            schedule_review_check(ctx.job_queue)
         ctx.user_data["await_review"] = True
         await ctx.bot.send_message(update.effective_chat.id, T.REVIEW_ASK)
     if source == "vopros":  # ссылка t.me/ritm_goda_bot?start=vopros сразу открывает вопрос
@@ -416,6 +417,7 @@ async def webinar_add(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Формат: /webinar_add 2026-11-15 15:00 Какой будет ваш 2027 год")
         return
     wid = await db.add_webinar(starts, title)
+    await schedule_reminders(ctx.application)
     await update.message.reply_text(f"Эфир №{wid} добавлен: {fmt_times(starts)['date']}, "
                                     f"{fmt_times(starts)['time_berlin']} по Берлину. "
                                     f"Ссылку добавьте командой /webinar_link {wid} https://...")
@@ -440,6 +442,8 @@ async def webinar_del(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ok = await db.delete_webinar(int(ctx.args[0]))
     except Exception:
         ok = False
+    if ok:
+        await schedule_reminders(ctx.application)
     await update.message.reply_text("Эфир удалён." if ok else "Формат: /webinar_del 1")
 
 
@@ -569,44 +573,93 @@ async def on_my_chat_member(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await notify_admins(ctx, f"🚫 Заблокировала(ся) бота: {who(m.from_user)}")
 
 
+REVIEW_LOCK = asyncio.Lock()
+REM_LOCK = asyncio.Lock()
+
+
 async def review_reminder_job(ctx: ContextTypes.DEFAULT_TYPE):
-    uids = await db.due_review_reminders()
-    if not uids:
-        return
-    await db.mark_review_reminded(uids)  # сначала отмечаем, чтобы не отправить дважды
+    async with REVIEW_LOCK:  # чтобы два задания не отправили одно напоминание дважды
+        uids = await db.due_review_reminders()
+        if not uids:
+            return
+        await db.mark_review_reminded(uids)  # сначала отмечаем, чтобы не отправить дважды
     kb = Kb([[Btn(T.BTN_RV_WRITE, callback_data="rvwrite")]])
     ok = await mass_send(ctx.bot, uids, lambda uid: ctx.bot.send_message(uid, T.REVIEW_REMIND, reply_markup=kb))
     log.info("Напоминание об отзыве: %s из %s", ok, len(uids))
 
 
-# ---------- напоминания (проверка раз в минуту) ----------
-ORDER = {"sent_24h": 1, "sent_1h": 2, "sent_10m": 3}
+def schedule_review_check(jq):
+    """Проверка отзывов через ~20 часов после отметки «был на эфире».
+    Все отметки в течение одного часа объединяются в одно задание."""
+    when = datetime.now(timezone.utc) + timedelta(hours=20, minutes=5)
+    when = when.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    name = "review:" + when.strftime("%Y%m%d%H")
+    if not jq.get_jobs_by_name(name):
+        jq.run_once(review_reminder_job, when=when, name=name)
+
+
+# ---------- напоминания об эфирах ----------
+# Раньше бот проверял базу каждую минуту, и база Neon никогда не «засыпала»
+# (бесплатный лимит 100 CU-часов в месяц заканчивался к середине месяца).
+# Теперь напоминания ставятся по расписанию: база нужна только в момент отправки.
+REM_KINDS = (("sent_24h", timedelta(hours=24)), ("sent_1h", timedelta(hours=1)),
+             ("sent_10m", timedelta(minutes=10)))
+
+
+async def schedule_reminders(app: Application):
+    """Пересчитать расписание напоминаний для всех будущих эфиров."""
+    jq = app.job_queue
+    for j in jq.jobs():
+        if j.name and j.name.startswith("rem:"):
+            j.schedule_removal()
+    now = datetime.now(timezone.utc)
+    n = 0
+    for w in await db.upcoming_webinars(limit=100):
+        overdue = None
+        for kind, delta in REM_KINDS:
+            if w[kind]:
+                continue
+            when = w["starts_at"] - delta
+            if when > now:
+                jq.run_once(reminder_job, when=when, data=(w["id"], kind), name=f"rem:{w['id']}:{kind}")
+                n += 1
+            else:
+                overdue = kind  # пропущенное (бот был выключен): шлём только самое свежее
+        if overdue:
+            jq.run_once(reminder_job, when=2, data=(w["id"], overdue), name=f"rem:{w['id']}:{overdue}")
+            n += 1
+    log.info("Напоминаний в расписании: %s", n)
 
 
 async def reminder_job(ctx: ContextTypes.DEFAULT_TYPE):
-    due = await db.due_reminders()
-    latest = {}
-    for w, kind in due:  # если бот был выключен — шлём только самое свежее напоминание
-        if w["id"] not in latest or ORDER[kind] > ORDER[latest[w["id"]][1]]:
-            latest[w["id"]] = (w, kind)
-    for w, kind in latest.values():
-        await db.mark_sent(w["id"], kind)  # сначала отмечаем, чтобы не отправить дважды
-        t = fmt_times(w["starts_at"])
-        if kind == "sent_24h":
-            text = T.REMIND_24H.format(title=w["title"], **t)
-        elif kind == "sent_1h":
-            text = T.REMIND_1H.format(title=w["title"], **t)
-        else:
-            text = (T.REMIND_10M_LINK.format(link=w["link"]) if w["link"]
-                    else T.REMIND_10M_NOLINK.format(channel=CHANNEL_URL))
-        uids = await db.registrants(w["id"])
-        ok = await mass_send(ctx.bot, uids, lambda uid: ctx.bot.send_message(uid, text))
-        log.info("Напоминание %s по эфиру %s: %s из %s", kind, w["id"], ok, len(uids))
-        for a in ADMIN_IDS:
-            try:
-                await ctx.bot.send_message(a, f"Напоминание ({kind}) по эфиру №{w['id']} отправлено: {ok} из {len(uids)}.")
-            except Exception:
-                pass
+    wid, kind = ctx.job.data
+    async with REM_LOCK:
+        w = await db.get_webinar(wid)
+        if not w or w[kind] or w["starts_at"] <= datetime.now(timezone.utc):
+            return
+        await db.mark_sent(wid, kind)  # сначала отмечаем, чтобы не отправить дважды
+    t = fmt_times(w["starts_at"])
+    if kind == "sent_24h":
+        text = T.REMIND_24H.format(title=w["title"], **t)
+    elif kind == "sent_1h":
+        text = T.REMIND_1H.format(title=w["title"], **t)
+    else:
+        text = (T.REMIND_10M_LINK.format(link=w["link"]) if w["link"]
+                else T.REMIND_10M_NOLINK.format(channel=CHANNEL_URL))
+    uids = await db.registrants(wid)
+    ok = await mass_send(ctx.bot, uids, lambda uid: ctx.bot.send_message(uid, text))
+    log.info("Напоминание %s по эфиру %s: %s из %s", kind, wid, ok, len(uids))
+    for a in ADMIN_IDS:
+        try:
+            await ctx.bot.send_message(a, f"Напоминание ({kind}) по эфиру №{wid} отправлено: {ok} из {len(uids)}.")
+        except Exception:
+            pass
+
+
+async def sync_job(ctx: ContextTypes.DEFAULT_TYPE):
+    """Раз в 6 часов: сверить расписание с базой и проверить отзывы (на случай перезапуска бота)."""
+    await schedule_reminders(ctx.application)
+    await review_reminder_job(ctx)
 
 
 async def on_error(update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -623,6 +676,7 @@ async def post_init(app: Application):
         BotCommand("stop", "Не получать сообщения"),
         BotCommand("delete_me", "Удалить мои данные"),
     ])
+    await schedule_reminders(app)
     log.info("Бот запущен. Администраторы: %s", ADMIN_IDS or "не заданы!")
 
 
@@ -665,8 +719,7 @@ def build_app() -> Application:
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.Document.ALL, on_document))
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, on_private_message))
     app.add_error_handler(on_error)
-    app.job_queue.run_repeating(reminder_job, interval=60, first=10)
-    app.job_queue.run_repeating(review_reminder_job, interval=600, first=60)
+    app.job_queue.run_repeating(sync_job, interval=6 * 3600, first=6 * 3600)
     return app
 
 
