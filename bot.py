@@ -134,9 +134,9 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_photo(f, caption=caption, reply_markup=main_menu())
     else:
         await update.message.reply_text(caption, reply_markup=main_menu())
-    if source == "kit":  # ссылка t.me/ritm_goda_bot?start=kit сразу ведёт к покупке
+    if source and (source == "kit" or source.startswith("kit_")):  # ссылка t.me/ritm_goda_bot?start=kit сразу ведёт к покупке
         await show_kit(update.effective_chat.id, u.id, ctx)
-    if source == "webinar":  # ссылка t.me/ritm_goda_bot?start=webinar сразу ведёт к записи
+    if source and (source == "webinar" or source.startswith("webinar_")):  # ссылка t.me/ritm_goda_bot?start=webinar сразу ведёт к записи
         await show_webinar(update.effective_chat.id, ctx)
     if source in ("efir", "otzyv"):  # ссылка на отзыв (в чат Zoom после эфира или для остальных)
         if source == "efir":
@@ -245,6 +245,8 @@ async def on_guide(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         with pr.open("rb") as f:
             await ctx.bot.send_document(q.message.chat_id, f, filename="Гайд Личный год 2027 для печати.pdf",
                                         caption=T.PRINT_CAPTION)
+    await ctx.bot.send_message(q.message.chat_id, T.CHANNEL_INVITE,
+                               reply_markup=Kb([[Btn(T.BTN_CHANNEL_SUB, url=CHANNEL_URL)]]))
     user = await db.get_user(q.from_user.id)
     if user and user["news_consent"] is None:
         await ctx.bot.send_message(q.message.chat_id, T.ASK_CONSENT, reply_markup=Kb([[
@@ -337,8 +339,8 @@ async def on_register(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = (T.REGISTERED if new else T.ALREADY_REGISTERED).format(title=w["title"], **t)
     await ctx.bot.send_message(q.message.chat_id, text,
                                reply_markup=Kb([[Btn(T.BTN_UNREGISTER, callback_data=f"unreg:{wid}")],
-                                                [Btn(T.BTN_WEBINAR, callback_data="webinar")],
-                                                [Btn(T.BTN_CHANNEL, url=CHANNEL_URL)]]))
+                                                [Btn(T.BTN_CHANNEL_SUB, url=CHANNEL_URL)],
+                                                [Btn(T.BTN_WEBINAR, callback_data="webinar")]]))
 
 
 async def on_unregister(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
