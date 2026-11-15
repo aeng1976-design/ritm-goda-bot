@@ -108,6 +108,12 @@ class DB:
                                  WHERE r.user_id=u.id AND w.starts_at > now())""")
         return [r["id"] for r in rows]
 
+    async def user_registrations(self, uid):
+        """Предстоящие эфиры, на которые записан пользователь."""
+        return await self.pool.fetch(
+            """SELECT w.* FROM registrations r JOIN webinars w ON w.id=r.webinar_id
+               WHERE r.user_id=$1 AND w.starts_at > now() ORDER BY w.starts_at""", uid)
+
     async def stats(self):
         return await self.pool.fetchrow(
             """SELECT count(*) AS total,

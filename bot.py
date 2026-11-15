@@ -370,6 +370,39 @@ async def privacy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(T.PRIVACY.format(privacy_url=PRIVACY_URL), disable_web_page_preview=True)
 
 
+async def status_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    user = await db.get_user(uid)
+    if not user:
+        await update.message.reply_text(T.STATUS_NONE)
+        return
+    if user["stopped"]:
+        news = T.STATUS_STOPPED
+    elif user["news_consent"] is True:
+        news = T.STATUS_NEWS_YES
+    elif user["news_consent"] is False:
+        news = T.STATUS_NEWS_NO
+    else:
+        news = T.STATUS_NEWS_UNKNOWN
+    regs = await db.user_registrations(uid)
+    if regs:
+        lines = []
+        for w in regs:
+            b_ = w["starts_at"].astimezone(BERLIN)
+            lines.append(f"• {T.WD_SHORT[b_.weekday()]} {b_.strftime('%d.%m')} в {b_.strftime('%H:%M')} (Берлин)")
+        webs = T.STATUS_WEB_YES + "\n" + "\n".join(lines)
+    else:
+        webs = T.STATUS_WEB_NO
+    if user["news_consent"] is True and not user["stopped"]:
+        kb = Kb([[Btn(T.BTN_STATUS_NEWS_OFF, callback_data="consent:0")]])
+    else:
+        kb = Kb([[Btn(T.BTN_STATUS_NEWS_ON, callback_data="consent:1")]])
+    rows = list(kb.inline_keyboard)
+    if not regs:
+        rows.append([Btn(T.BTN_BC_REGISTER, callback_data="webinar")])
+    await update.message.reply_text(T.STATUS.format(news=news, webs=webs), reply_markup=Kb(rows))
+
+
 async def myid(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Ваш Telegram ID: {update.effective_user.id}")
 
@@ -691,6 +724,7 @@ async def post_init(app: Application):
     from telegram import BotCommand
     await app.bot.set_my_commands([
         BotCommand("start", "Главное меню"),
+        BotCommand("status", "Мои подписки и записи на эфиры"),
         BotCommand("privacy", "Какие данные хранит бот"),
         BotCommand("stop", "Не получать сообщения"),
         BotCommand("delete_me", "Удалить мои данные"),
@@ -718,7 +752,7 @@ def build_app() -> Application:
     app = (Application.builder().token(BOT_TOKEN)
            .post_init(post_init).post_shutdown(post_shutdown).build())
     for name, fn in [("start", start), ("stop", stop), ("delete_me", delete_me), ("privacy", privacy),
-                     ("myid", myid), ("admin", admin_help), ("stats", stats), ("webinars", webinars),
+                     ("myid", myid), ("status", status_cmd), ("admin", admin_help), ("stats", stats), ("webinars", webinars),
                      ("webinar_add", webinar_add), ("webinar_link", webinar_link),
                      ("webinar_del", webinar_del), ("broadcast", broadcast), ("broadcast_unreg", broadcast_unreg),
                      ("send_registered", send_registered), ("prices", prices_cmd),
