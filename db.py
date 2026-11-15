@@ -99,6 +99,15 @@ class DB:
             "SELECT id FROM users WHERE news_consent IS TRUE AND stopped IS FALSE")
         return [r["id"] for r in rows]
 
+    async def news_unregistered(self):
+        """Согласившиеся на новости, которые не записаны ни на один предстоящий эфир."""
+        rows = await self.pool.fetch(
+            """SELECT u.id FROM users u
+               WHERE u.news_consent IS TRUE AND u.stopped IS FALSE
+                 AND NOT EXISTS (SELECT 1 FROM registrations r JOIN webinars w ON w.id=r.webinar_id
+                                 WHERE r.user_id=u.id AND w.starts_at > now())""")
+        return [r["id"] for r in rows]
+
     async def stats(self):
         return await self.pool.fetchrow(
             """SELECT count(*) AS total,

@@ -449,18 +449,29 @@ async def webinar_del(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Эфир удалён." if ok else "Формат: /webinar_del 1")
 
 
-async def broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Ответьте /broadcast на любое сообщение — бот попросит подтверждение."""
+async def _broadcast_ask(update, ctx, mode):
     if not is_admin(update):
         return
+    cmd = "/broadcast" if mode == "all" else "/broadcast_unreg"
     src = update.message.reply_to_message
     if not src:
-        await update.message.reply_text("Ответьте командой /broadcast на сообщение, которое нужно разослать.")
+        await update.message.reply_text(f"Ответьте командой {cmd} на сообщение, которое нужно разослать.")
         return
-    n = len(await db.news_recipients())
-    ctx.user_data["bc"] = (src.chat_id, src.message_id)
-    await update.message.reply_text(f"Разослать это сообщение {n} подписчикам?", reply_markup=Kb([[
+    uids = await (db.news_recipients() if mode == "all" else db.news_unregistered())
+    ctx.user_data["bc"] = (src.chat_id, src.message_id, mode)
+    who = "подписчикам" if mode == "all" else "подписчикам, которые ещё не записались на эфир (с кнопкой записи)"
+    await update.message.reply_text(f"Разослать это сообщение {len(uids)} {who}?", reply_markup=Kb([[
         Btn("Да, отправить", callback_data="bc:yes"), Btn("Отмена", callback_data="bc:no")]]))
+
+
+async def broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Ответьте /broadcast на любое сообщение — бот попросит подтверждение."""
+    await _broadcast_ask(update, ctx, "all")
+
+
+async def broadcast_unreg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Рассылка тем, кто согласился на новости, но не записан ни на один предстоящий эфир."""
+    await _broadcast_ask(update, ctx, "unreg")
 
 
 async def on_broadcast_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -472,10 +483,16 @@ async def on_broadcast_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if q.data == "bc:no" or not data:
         await q.edit_message_text("Рассылка отменена.")
         return
-    chat_id, msg_id = data
-    uids = await db.news_recipients()
+    chat_id, msg_id, mode = data
+    if mode == "all":
+        uids = await db.news_recipients()
+        markup = None
+    else:
+        uids = await db.news_unregistered()
+        markup = Kb([[Btn(T.BTN_BC_REGISTER, callback_data="webinar")]])
     await q.edit_message_text(f"Отправляю {len(uids)} подписчикам…")
-    ok = await mass_send(ctx.bot, uids, lambda uid: ctx.bot.copy_message(uid, chat_id, msg_id))
+    ok = await mass_send(ctx.bot, uids,
+                         lambda uid: ctx.bot.copy_message(uid, chat_id, msg_id, reply_markup=markup))
     await ctx.bot.send_message(q.from_user.id, f"Рассылка завершена: доставлено {ok} из {len(uids)}.")
 
 
@@ -703,7 +720,7 @@ def build_app() -> Application:
     for name, fn in [("start", start), ("stop", stop), ("delete_me", delete_me), ("privacy", privacy),
                      ("myid", myid), ("admin", admin_help), ("stats", stats), ("webinars", webinars),
                      ("webinar_add", webinar_add), ("webinar_link", webinar_link),
-                     ("webinar_del", webinar_del), ("broadcast", broadcast),
+                     ("webinar_del", webinar_del), ("broadcast", broadcast), ("broadcast_unreg", broadcast_unreg),
                      ("send_registered", send_registered), ("prices", prices_cmd),
                      ("reviews", reviews_cmd), ("consults", consults_cmd)]:
         app.add_handler(CommandHandler(name, fn))
