@@ -170,9 +170,9 @@ async def show_paid(chat_id, u, source, ctx):
                              f"Тариф: {PAID_SOURCES[source]} · Telegram ID: {u.id}\n"
                              f"(в Stripe это client_reference_id tg{u.id}; проверьте оплату)")
     if source == "plan":
-        await ctx.bot.send_message(chat_id, T.PAID_PLAN)
+        await ctx.bot.send_message(chat_id, T.PAID_PLAN.format(confirm=T.ORDER_CONFIRM))
     else:
-        text = T.CONSULT_ASK.format(plus=T.CONSULT_PLUS if source == "soprov" else "")
+        text = T.CONSULT_ASK.format(plus=T.CONSULT_PLUS if source == "soprov" else "", confirm=T.ORDER_CONFIRM)
         await ctx.bot.send_message(chat_id, text, reply_markup=Kb([
             [Btn(T.BTN_CONS_ALEX, callback_data=f"cons:{source}:alex"),
              Btn(T.BTN_CONS_LUDA, callback_data=f"cons:{source}:luda")],
