@@ -165,6 +165,15 @@ class DB:
         await self.pool.execute(
             "DELETE FROM registrations WHERE user_id=$1 AND webinar_id=$2", uid, wid)
 
+    async def registrants_full(self, wid):
+        return await self.pool.fetch(
+            """SELECT u.id, u.first_name, u.username, u.source, u.stopped, r.created_at
+               FROM registrations r JOIN users u ON u.id=r.user_id
+               WHERE r.webinar_id=$1 ORDER BY r.created_at""", wid)
+
+    async def users_by_ids(self, ids):
+        return await self.pool.fetch("SELECT id, first_name, username FROM users WHERE id = ANY($1::bigint[])", list(ids))
+
     async def registrants(self, wid):
         rows = await self.pool.fetch(
             """SELECT u.id FROM registrations r JOIN users u ON u.id=r.user_id

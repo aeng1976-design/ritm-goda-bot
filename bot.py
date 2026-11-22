@@ -85,11 +85,13 @@ async def safe_send(bot, uid, coro_factory):
     return False
 
 
-async def mass_send(bot, uids, send_one):
+async def mass_send(bot, uids, send_one, failed=None):
     ok = 0
     for uid in uids:
         if await safe_send(bot, uid, lambda u=uid: send_one(u)):
             ok += 1
+        elif failed is not None:
+            failed.append(uid)
         await asyncio.sleep(0.05)  # не больше ~20 сообщений в секунду
     return ok
 
@@ -441,6 +443,46 @@ async def webinars(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n\n".join(out), disable_web_page_preview=True)
 
 
+def name_of(r):
+    name = (r["first_name"] or "").strip() or "без имени"
+    return f"{name} (@{r['username']})" if r["username"] else name
+
+
+async def regs_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/regs 3 — кто и когда записался на эфир №3. Без номера — по всем предстоящим эфирам."""
+    if not is_admin(update):
+        return
+    if ctx.args:
+        try:
+            ids = [int(ctx.args[0])]
+        except ValueError:
+            await update.message.reply_text("Формат: /regs 3 (номер эфира) или просто /regs")
+            return
+    else:
+        ids = [w["id"] for w in await db.upcoming_webinars(limit=100)]
+        if not ids:
+            await update.message.reply_text("Предстоящих эфиров нет. Список по прошедшему: /regs 2")
+            return
+    out = []
+    for wid in ids:
+        w = await db.get_webinar(wid)
+        if not w:
+            out.append(f"Эфира №{wid} нет.")
+            continue
+        t = fmt_times(w["starts_at"])
+        rows = await db.registrants_full(wid)
+        lines = [f"№{wid} · {t['date']} {t['time_berlin']} · записались: {len(rows)}"]
+        for i, r in enumerate(rows, 1):
+            when = r["created_at"].astimezone(BERLIN).strftime("%d.%m %H:%M")
+            src = f" · {r['source']}" if r["source"] else ""
+            stop = " · ⛔ заблокировал(а) бота" if r["stopped"] else ""
+            lines.append(f"{i}. {name_of(r)} · {when}{src}{stop}")
+        out.append("\n".join(lines))
+    text = "\n\n".join(out)
+    for i in range(0, len(text), 3800):
+        await update.message.reply_text(text[i:i + 3800])
+
+
 async def webinar_add(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         return
@@ -699,11 +741,16 @@ async def reminder_job(ctx: ContextTypes.DEFAULT_TYPE):
         text = (T.REMIND_10M_LINK.format(link=w["link"]) if w["link"]
                 else T.REMIND_10M_NOLINK.format(channel=CHANNEL_URL))
     uids = await db.registrants(wid)
-    ok = await mass_send(ctx.bot, uids, lambda uid: ctx.bot.send_message(uid, text))
+    failed = []
+    ok = await mass_send(ctx.bot, uids, lambda uid: ctx.bot.send_message(uid, text), failed)
     log.info("Напоминание %s по эфиру %s: %s из %s", kind, wid, ok, len(uids))
+    report = f"Напоминание ({kind}) по эфиру №{wid} отправлено: {ok} из {len(uids)}."
+    if failed:
+        names = [name_of(r) for r in await db.users_by_ids(failed)]
+        report += "\nНе дошло: " + ", ".join(names) + ". Лучше отправить им ссылку лично."
     for a in ADMIN_IDS:
         try:
-            await ctx.bot.send_message(a, f"Напоминание ({kind}) по эфиру №{wid} отправлено: {ok} из {len(uids)}.")
+            await ctx.bot.send_message(a, report)
         except Exception:
             pass
 
@@ -755,7 +802,7 @@ def build_app() -> Application:
                      ("myid", myid), ("status", status_cmd), ("admin", admin_help), ("stats", stats), ("webinars", webinars),
                      ("webinar_add", webinar_add), ("webinar_link", webinar_link),
                      ("webinar_del", webinar_del), ("broadcast", broadcast), ("broadcast_unreg", broadcast_unreg),
-                     ("send_registered", send_registered), ("prices", prices_cmd),
+                     ("send_registered", send_registered), ("regs", regs_cmd), ("prices", prices_cmd),
                      ("reviews", reviews_cmd), ("consults", consults_cmd)]:
         app.add_handler(CommandHandler(name, fn))
     app.add_handler(CallbackQueryHandler(on_guide, pattern="^guide$"))
