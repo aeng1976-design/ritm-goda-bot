@@ -77,7 +77,7 @@ PDC = {1: "не браться сразу за много дел и не дав�
        9: "не начинать новое и не цепляться за то, что уходит"}
 # Даты по делам (личный день)
 CATS = [(1, "Начинать новое, ставить цели"), (2, "Важные встречи и разговоры по душам"),
-        (3, "Учёба, поездки, организационные дела"), (4, "Работа, порядок, спорт"),
+        (3, "Учёба, новые знания, движение"), (4, "Работа, порядок, спорт"),
         (5, "Выходить к людям, рассказывать о себе"), (6, "Отдых, семья, удовольствие"),
         (7, "Тишина, практики, ничего важного не начинать"), (8, "Деньги, договоры, большие результаты"),
         (9, "Завершать дела, подводить итоги")]
@@ -483,7 +483,7 @@ def morning_text(du, d, tasks):
     zero = (ZTXT + "\n\n") if d.day in ZERO else ""
     good = ("🖋 <b>Сегодня благоприятный общий день</b> для договоров, документов, крупных покупок, "
             "поездок и планирования операций.\n\n") if is_good(d) else ""
-    if is_paid(du, d):
+    if True:  # пробная неделя и платный доступ: одинаково подробно
         x = month_info(du["bd"], d)
         txt = (head + zero + good +
                f"🔮 <b>Задача дня · «{PLAIN[n]}»</b>\n{first_sentence(DD.YARC[n][1])}\n"
@@ -664,6 +664,30 @@ async def on_paid(chat_id, u, source, ctx):
         return await ctx.bot.send_message(chat_id, f"Новый срок начнётся {start:%d.%m.%Y}, план на него я пришлю в этот день 🌿")
     if o["months"] > 1:
         await ctx.bot.send_message(chat_id, overview_text(du, start, until), parse_mode="HTML")
+    await send_period_plan(ctx, u.id, du, start)
+
+
+async def grant_plan_year(chat_id, u, ctx, label):
+    """Личный план (89 / 213 / 402 €) включает «Мой день» на год."""
+    d = today()
+    du = await db.day_user(u.id)
+    if not du:
+        await db.day_create(u.id)
+        du = await db.day_user(u.id)
+    cont = du["paid_until"] and du["paid_until"] >= d
+    start = du["paid_until"] + timedelta(days=1) if cont else d
+    until = add_months(start, 12) - timedelta(days=1)
+    await db.day_set(u.id, paid_until=until, paid_from=(du["paid_from"] if cont and du["paid_from"] else start),
+                     active=True, plan_key="plan_" + label)
+    await ctx.bot.send_message(chat_id, f"🌿 В ваш тариф входит «Мой день» на год: доступ до {until:%d.%m.%Y}.\n"
+                                        "Каждое утро и вечер я буду присылать энергию дня, а каждый месяц подробный план.")
+    du = await db.day_user(u.id)
+    if not du["bd"]:
+        return await open_day(chat_id, u.id, ctx)
+    schedule(ctx.application, du)
+    if cont:
+        return
+    await ctx.bot.send_message(chat_id, overview_text(du, start, until), parse_mode="HTML")
     await send_period_plan(ctx, u.id, du, start)
 
 

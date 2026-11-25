@@ -187,6 +187,11 @@ async def show_paid(chat_id, u, source, ctx):
             [Btn(T.BTN_CONS_ALEX, callback_data=f"cons:{source}:alex"),
              Btn(T.BTN_CONS_LUDA, callback_data=f"cons:{source}:luda")],
             [Btn(T.BTN_CONS_ANY, callback_data=f"cons:{source}:any")]]))
+    try:
+        await day.grant_plan_year(chat_id, u, ctx, source)
+    except Exception as e:
+        log.warning("«Мой день» к плану: %s", e)
+        await notify_admins(ctx, f"⚠️ Не удалось открыть «Мой день» на год для {who(u)}: дайте доступ /den_access {u.id} 365")
     if not await send_guide12(chat_id, ctx):
         await notify_admins(ctx, f"⚠️ Гайд «12 дней» не отправлен ({who(u)}): файл не загружен в бота. "
                                  "Отправьте боту PDF с подписью guide12 и перешлите покупателю вручную.")
