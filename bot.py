@@ -548,14 +548,15 @@ async def webinar_del(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def _broadcast_ask(update, ctx, mode):
     if not is_admin(update):
         return
-    cmd = "/broadcast" if mode == "all" else "/broadcast_unreg"
+    cmd = {"all": "/broadcast", "unreg": "/broadcast_unreg", "den": "/broadcast_den"}[mode]
     src = update.message.reply_to_message
     if not src:
         await update.message.reply_text(f"Ответьте командой {cmd} на сообщение, которое нужно разослать.")
         return
-    uids = await (db.news_recipients() if mode == "all" else db.news_unregistered())
+    uids = await (db.news_unregistered() if mode == "unreg" else db.news_recipients())
     ctx.user_data["bc"] = (src.chat_id, src.message_id, mode)
-    who = "подписчикам" if mode == "all" else "подписчикам, которые ещё не записались на эфир (с кнопкой записи)"
+    who = {"all": "подписчикам", "unreg": "подписчикам, которые ещё не записались на эфир (с кнопкой записи)",
+           "den": "подписчикам (с кнопкой «🌿 Попробовать «Мой день»»)"}[mode]
     await update.message.reply_text(f"Разослать это сообщение {len(uids)} {who}?", reply_markup=Kb([[
         Btn("Да, отправить", callback_data="bc:yes"), Btn("Отмена", callback_data="bc:no")]]))
 
@@ -563,6 +564,11 @@ async def _broadcast_ask(update, ctx, mode):
 async def broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Ответьте /broadcast на любое сообщение — бот попросит подтверждение."""
     await _broadcast_ask(update, ctx, "all")
+
+
+async def broadcast_den(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Рассылка подписчикам с кнопкой «Попробовать «Мой день»»."""
+    await _broadcast_ask(update, ctx, "den")
 
 
 async def broadcast_unreg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -583,6 +589,9 @@ async def on_broadcast_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if mode == "all":
         uids = await db.news_recipients()
         markup = None
+    elif mode == "den":
+        uids = await db.news_recipients()
+        markup = Kb([[Btn("🌿 Попробовать «Мой день»", callback_data="den:open")]])
     else:
         uids = await db.news_unregistered()
         markup = Kb([[Btn(T.BTN_BC_REGISTER, callback_data="webinar")]])
@@ -854,7 +863,7 @@ def build_app() -> Application:
     for name, fn in [("start", start), ("stop", stop), ("delete_me", delete_me), ("privacy", privacy),
                      ("myid", myid), ("status", status_cmd), ("admin", admin_help), ("stats", stats), ("webinars", webinars),
                      ("webinar_add", webinar_add), ("webinar_link", webinar_link),
-                     ("webinar_del", webinar_del), ("broadcast", broadcast), ("broadcast_unreg", broadcast_unreg),
+                     ("webinar_del", webinar_del), ("broadcast", broadcast), ("broadcast_unreg", broadcast_unreg), ("broadcast_den", broadcast_den),
                      ("send_registered", send_registered), ("regs", regs_cmd), ("prices", prices_cmd),
                      ("reviews", reviews_cmd), ("consults", consults_cmd),
                      ("den_access", lambda u, c: day.admin_access(u, c, is_admin)),
