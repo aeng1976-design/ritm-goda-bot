@@ -977,7 +977,8 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await ctx.bot.send_message(chat, "📝 Дела на сегодня. Нажмите на дело, чтобы отметить:", reply_markup=await done_kb(uid, today()))
         if len(rows) < 3:
             return await ctx.bot.send_message(chat, "Записать дела на сегодня? Я спрошу по одному." if not rows else "Можно добавить ещё дело.",
-                                              reply_markup=Kb([[Btn("✍️ Записать", callback_data="den:now")]]))
+                                              reply_markup=Kb([[Btn("✍️ Записать сейчас", callback_data="den:now"),
+                                                                Btn("⏰ Напишу позже", callback_data="den:later")]]))
         return
     if act == "done":
         d = datetime.strptime(parts[2], "%Y%m%d").date()
