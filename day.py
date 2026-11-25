@@ -490,6 +490,7 @@ async def stripe_job(ctx: ContextTypes.DEFAULT_TYPE):
                 renewed = bool(du["paid_until"]) and du["paid_until"] < pe and du["sub_reminded"] is not None
                 await db.day_set(uid, paid_until=pe, sub_cancel=canc, active=True)
                 if renewed:
+                    await db.ev(uid, "sub_renew", f"до {pe:%d.%m.%Y}")
                     await notify_admins(ctx, f"🔄 «Мой день»: продление {du['name']} (ID {uid}), {OPT['den_msub']['price']} €, до {pe:%d.%m.%Y}")
                     await _send(ctx, uid, f"🔄 Подписка продлена до {pe:%d.%m.%Y}. Спасибо, что вы с нами 💛")
             if canc != du["sub_cancel"]:
@@ -733,6 +734,7 @@ async def access_job(ctx: ContextTypes.DEFAULT_TYPE):
         if du["trial_until"] == d:
             await _send(ctx, uid, "Сегодня последний день пробной недели 🌿\n\n" + offer_text(), offer_kb(uid))
         elif du["trial_until"] == d - timedelta(days=1) and not paid:
+            await db.ev(uid, "trial_end")
             await notify_admins(ctx, f"🌿 Пробная неделя закончилась: {du['name']} (ID {uid})")
             if not du["fb_done"]:
                 await ask_feedback(ctx, uid)
@@ -924,6 +926,7 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if act == "subyes":
             await notify_admins(ctx, f"❌ «Мой день»: {du['name']} (ID {uid}) отменила продление, доступ до {du['paid_until']:%d.%m.%Y}")
             return await q.edit_message_text(f"Продление отменено ✅ Списаний больше не будет. «Мой день» работает до {du['paid_until']:%d.%m.%Y}. Вернуться можно в любой момент 🌿")
+        await db.ev(uid, "sub_resume")
         await notify_admins(ctx, f"🔄 «Мой день»: {du['name']} (ID {uid}) возобновила продление")
         return await q.edit_message_text("Продление снова включено ✅")
     if not du or not du["bd"]:
@@ -1021,6 +1024,7 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                                           reply_markup=Kb([[Btn("Утром", callback_data="den:g:am"), Btn("Вечером", callback_data="den:g:pm")]]))
     if act == "pause":
         await db.day_set(uid, active=not du["active"])
+        await db.ev(uid, "den_pause" if du["active"] else "den_unpause")
         du = await db.day_user(uid)
         schedule(ctx.application, du)
         return await ctx.bot.send_message(chat, "⏸ Сообщения на паузе: утром и вечером я ничего не присылаю. Включить снова можно в «🌿 Мой день» → «▶️ Включить сообщения снова»." if not du["active"] else "Сообщения снова включены ✅")
@@ -1187,6 +1191,7 @@ async def admin_access(update: Update, ctx: ContextTypes.DEFAULT_TYPE, is_admin)
     du = await db.day_user(uid)
     if du["bd"]:
         schedule(ctx.application, du)
+    await db.ev(uid, "den_access", f"до {until:%d.%m.%Y}")
     await update.message.reply_text(f"Доступ для {uid} до {until:%d.%m.%Y} ✅")
 
 

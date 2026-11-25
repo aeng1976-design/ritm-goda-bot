@@ -101,6 +101,15 @@ CREATE TABLE IF NOT EXISTS day_log (
     grat     INT NOT NULL DEFAULT 0,
     PRIMARY KEY (user_id, day)
 );
+CREATE TABLE IF NOT EXISTS events (
+    id       BIGSERIAL PRIMARY KEY,
+    user_id  BIGINT REFERENCES users(id) ON DELETE CASCADE,
+    at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    kind     TEXT NOT NULL,
+    detail   TEXT
+);
+CREATE INDEX IF NOT EXISTS events_user ON events(user_id, at);
+CREATE INDEX IF NOT EXISTS events_at ON events(at);
 CREATE TABLE IF NOT EXISTS consult_choice (
     user_id    BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
     product    TEXT,
@@ -125,6 +134,17 @@ class DB:
                                               max_inactive_connection_lifetime=60)
         async with self.pool.acquire() as c:
             await c.execute(SCHEMA)
+        if not await self.get_setting("events_since"):
+            from datetime import datetime, timezone
+            await self.set_setting("events_since", datetime.now(timezone.utc).isoformat())
+
+    # --- журнал событий (для статистики) ---
+    async def ev(self, uid, kind, detail=None):
+        try:
+            await self.pool.execute("INSERT INTO events(user_id,kind,detail) VALUES($1,$2,$3)", uid, kind,
+                                    None if detail is None else str(detail)[:300])
+        except Exception:
+            pass
 
     async def close(self):
         if self.pool:
@@ -135,12 +155,22 @@ class DB:
         return await self.pool.fetchrow("SELECT * FROM day_users WHERE user_id=$1", uid)
 
     async def day_create(self, uid):
-        await self.pool.execute("INSERT INTO day_users(user_id) VALUES($1) ON CONFLICT DO NOTHING", uid)
+        r = await self.pool.execute("INSERT INTO day_users(user_id) VALUES($1) ON CONFLICT DO NOTHING", uid)
+        if r.endswith("1"):
+            await self.ev(uid, "den_open")
 
     async def day_set(self, uid, **kw):
         keys = list(kw)
         sets = ", ".join(f"{k}=${i+2}" for i, k in enumerate(keys))
         await self.pool.execute(f"UPDATE day_users SET {sets} WHERE user_id=$1", uid, *[kw[k] for k in keys])
+        if kw.get("trial_until"):
+            await self.ev(uid, "den_trial", f"{kw['trial_until']:%d.%m.%Y}")
+        if kw.get("paid_until") and "plan_key" in kw:
+            await self.ev(uid, "den_paid", f"{kw.get('plan_key')} до {kw['paid_until']:%d.%m.%Y}")
+        if kw.get("sub_cancel") is True:
+            await self.ev(uid, "sub_cancel")
+        if "sub_id" in kw and kw["sub_id"] is None and "plan_key" in kw:
+            await self.ev(uid, "sub_end")
 
     async def day_active_users(self):
         return await self.pool.fetch("SELECT * FROM day_users WHERE active AND bd IS NOT NULL")
@@ -159,6 +189,7 @@ class DB:
         await self.pool.execute("UPDATE day_tasks SET done = NOT done WHERE user_id=$1 AND day=$2 AND idx=$3", uid, day, idx)
 
     async def day_reset(self, uid):
+        await self.ev(uid, "den_reset")
         for t in ("day_tasks", "day_goals", "day_week", "day_feedback", "day_log", "day_users"):
             await self.pool.execute(f"DELETE FROM {t} WHERE user_id=$1", uid)
 
@@ -182,6 +213,8 @@ class DB:
         return t["n"], t["done"], g
 
     async def day_fb_set(self, uid, **kw):
+        if kw.get("recommend"):
+            await self.ev(uid, "feedback", kw["recommend"])
         await self.pool.execute("INSERT INTO day_feedback(user_id) VALUES($1) ON CONFLICT DO NOTHING", uid)
         keys = list(kw)
         sets = ", ".join(f"{k}=${i+2}" for i, k in enumerate(keys))
@@ -199,21 +232,29 @@ class DB:
 
     # --- пользователи ---
     async def upsert_user(self, uid, first_name, username, source=None):
-        await self.pool.execute(
+        new = await self.pool.fetchval(
             """INSERT INTO users (id, first_name, username, source) VALUES ($1,$2,$3,$4)
                ON CONFLICT (id) DO UPDATE SET first_name=$2, username=$3,
                  stopped=FALSE, last_seen=now(),
-                 source=COALESCE(users.source, EXCLUDED.source)""",
+                 source=COALESCE(users.source, EXCLUDED.source)
+               RETURNING (xmax = 0)""",
             uid, first_name, username, source)
+        if new:
+            await self.ev(uid, "new", source)
+        elif source:
+            await self.ev(uid, "start", source)
 
     async def get_user(self, uid):
         return await self.pool.fetchrow("SELECT * FROM users WHERE id=$1", uid)
 
     async def set_consent(self, uid, value):
         await self.pool.execute("UPDATE users SET news_consent=$2 WHERE id=$1", uid, value)
+        await self.ev(uid, "news_yes" if value else "news_no")
 
     async def stop_user(self, uid):
-        await self.pool.execute("UPDATE users SET stopped=TRUE WHERE id=$1", uid)
+        r = await self.pool.execute("UPDATE users SET stopped=TRUE WHERE id=$1 AND stopped=FALSE", uid)
+        if r.endswith("1"):
+            await self.ev(uid, "stop")
 
     async def delete_user(self, uid):
         await self.pool.execute("DELETE FROM users WHERE id=$1", uid)
@@ -283,11 +324,14 @@ class DB:
         r = await self.pool.execute(
             "INSERT INTO registrations (user_id, webinar_id) VALUES ($1,$2) ON CONFLICT DO NOTHING",
             uid, wid)
+        if r.endswith("1"):
+            await self.ev(uid, "reg", wid)
         return r.endswith("1")
 
     async def unregister(self, uid, wid):
         await self.pool.execute(
             "DELETE FROM registrations WHERE user_id=$1 AND webinar_id=$2", uid, wid)
+        await self.ev(uid, "unreg", wid)
 
     async def registrants_full(self, wid):
         return await self.pool.fetch(
@@ -331,6 +375,7 @@ class DB:
             "ON CONFLICT (key) DO UPDATE SET value=$2", key, value)
 
     async def add_review(self, uid, text):
+        await self.ev(uid, "review")
         return await self.pool.fetchval(
             "INSERT INTO reviews (user_id, text) VALUES ($1,$2) RETURNING id", uid, text)
 
@@ -347,6 +392,7 @@ class DB:
     async def mark_attended(self, uid):
         await self.pool.execute(
             "INSERT INTO attended (user_id) VALUES ($1) ON CONFLICT DO NOTHING", uid)
+        await self.ev(uid, "attended")
 
     async def due_review_reminders(self):
         rows = await self.pool.fetch(
@@ -368,9 +414,58 @@ class DB:
             """INSERT INTO consult_choice (user_id, product, choice) VALUES ($1,$2,$3)
                ON CONFLICT (user_id) DO UPDATE SET product=$2, choice=$3, created_at=now()""",
             uid, product, choice)
+        await self.ev(uid, "consult", f"{product}: {choice}")
 
     async def last_consults(self, n=20):
         return await self.pool.fetch(
             """SELECT c.user_id, c.product, c.choice, c.created_at, u.first_name, u.username
                FROM consult_choice c JOIN users u ON u.id=c.user_id
                ORDER BY c.created_at DESC LIMIT $1""", n)
+
+    # --- статистика ---
+    async def events_period(self, since):
+        return await self.pool.fetch("SELECT kind, detail, count(*) AS n FROM events WHERE at >= $1 GROUP BY 1,2", since)
+
+    async def last_events(self, n=30):
+        return await self.pool.fetch(
+            """SELECT e.*, u.first_name, u.username FROM events e LEFT JOIN users u ON u.id=e.user_id
+               ORDER BY e.at DESC LIMIT $1""", n)
+
+    async def user_events(self, uid):
+        return await self.pool.fetch("SELECT * FROM events WHERE user_id=$1 ORDER BY at", uid)
+
+    async def user_history(self, uid):
+        """Старые записи (до появления журнала): регистрации на эфиры, «был на эфире», отзывы, «Мой день», консультации."""
+        return await self.pool.fetch(
+            """SELECT r.created_at AS at, 'reg' AS kind, r.webinar_id::text AS detail FROM registrations r WHERE r.user_id=$1
+               UNION ALL SELECT created_at, 'attended', NULL FROM attended WHERE user_id=$1
+               UNION ALL SELECT created_at, 'review', NULL FROM reviews WHERE user_id=$1
+               UNION ALL SELECT created_at, 'den_open', NULL FROM day_users WHERE user_id=$1
+               UNION ALL SELECT created_at, 'consult', product || ': ' || choice FROM consult_choice WHERE user_id=$1""", uid)
+
+    async def counts_since(self, since):
+        return await self.pool.fetchrow(
+            """SELECT (SELECT count(*) FROM users WHERE created_at >= $1) AS new_users,
+                      (SELECT count(*) FROM registrations WHERE created_at >= $1) AS regs,
+                      (SELECT count(*) FROM attended WHERE created_at >= $1) AS attended,
+                      (SELECT count(*) FROM reviews WHERE created_at >= $1) AS reviews,
+                      (SELECT count(*) FROM day_users WHERE created_at >= $1 AND bd IS NOT NULL) AS den_users""", since)
+
+    async def export_users(self):
+        return await self.pool.fetch(
+            """SELECT u.*, d.name AS den_name, d.bd AS den_bd, d.created_at AS den_since, d.trial_until, d.paid_until,
+                      d.plan_key, d.plan_pdf, d.sub_id, d.sub_cancel, d.active AS den_active,
+                      (SELECT string_agg(to_char(w.starts_at AT TIME ZONE 'Europe/Berlin','DD.MM'), ', ' ORDER BY w.starts_at)
+                         FROM registrations r JOIN webinars w ON w.id=r.webinar_id WHERE r.user_id=u.id) AS webinars,
+                      EXISTS(SELECT 1 FROM attended a WHERE a.user_id=u.id) AS was_live,
+                      (SELECT count(*) FROM reviews r WHERE r.user_id=u.id) AS n_reviews,
+                      c.product AS consult_product, c.choice AS consult_choice,
+                      f.liked, f.inconvenient, f.recommend
+               FROM users u LEFT JOIN day_users d ON d.user_id=u.id
+               LEFT JOIN consult_choice c ON c.user_id=u.id LEFT JOIN day_feedback f ON f.user_id=u.id
+               ORDER BY u.created_at""")
+
+    async def export_events(self):
+        return await self.pool.fetch(
+            """SELECT e.at, e.user_id, u.first_name, u.username, e.kind, e.detail
+               FROM events e LEFT JOIN users u ON u.id=e.user_id ORDER BY e.at""")

@@ -19,6 +19,7 @@ from telegram.ext import (Application, CallbackQueryHandler, ChatMemberHandler, 
 
 import texts as T
 import day
+import report
 from db import DB
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", level=logging.INFO)
@@ -258,6 +259,7 @@ async def consults_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def on_guide(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
+    await db.ev(q.from_user.id, "guide")
     with (FILES / "gayd_lichnyy_god_2027.pdf").open("rb") as f:
         await ctx.bot.send_document(q.message.chat_id, f, filename="Гайд Личный год 2027.pdf",
                                     caption=T.GUIDE_CAPTION)
@@ -309,6 +311,7 @@ def pay_url(base, uid):
 
 
 async def show_kit(chat_id, uid, ctx):
+    await db.ev(uid, "kit_view")
     web = (await db.get_setting("prices", "regular")) == "webinar"
     if web:
         links = (PAY_URL_KIT_WEB, PAY_URL_FULL_WEB, PAY_URL_PLUS_WEB)
@@ -868,7 +871,11 @@ def build_app() -> Application:
                      ("reviews", reviews_cmd), ("consults", consults_cmd),
                      ("den_access", lambda u, c: day.admin_access(u, c, is_admin)),
                      ("den_stats", lambda u, c: day.admin_stats(u, c, is_admin)),
-                     ("den_reset", lambda u, c: day.admin_reset(u, c, is_admin))]:
+                     ("den_reset", lambda u, c: day.admin_reset(u, c, is_admin)),
+                     ("report", lambda u, c: report.report_cmd(u, c, db, is_admin)),
+                     ("log", lambda u, c: report.log_cmd(u, c, db, is_admin)),
+                     ("user", lambda u, c: report.user_cmd(u, c, db, is_admin)),
+                     ("export", lambda u, c: report.export_cmd(u, c, db, is_admin))]:
         app.add_handler(CommandHandler(name, fn))
     app.add_handler(CallbackQueryHandler(on_guide, pattern="^guide$"))
     app.add_handler(CallbackQueryHandler(on_webinar, pattern="^webinar$"))
