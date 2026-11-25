@@ -18,6 +18,7 @@ from telegram.ext import (Application, CallbackQueryHandler, ChatMemberHandler, 
                           ContextTypes, MessageHandler, filters)
 
 import texts as T
+import day
 from db import DB
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", level=logging.INFO)
@@ -59,6 +60,7 @@ def fmt_times(starts_at):
 
 def main_menu():
     return Kb([
+        [Btn(T.BTN_DAY, callback_data="den:open")],
         [Btn(T.BTN_GUIDE, callback_data="guide")],
         [Btn(T.BTN_WEBINAR, callback_data="webinar")],
         [Btn(T.BTN_KIT, callback_data="kit")],
@@ -124,6 +126,12 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await notify_admins(ctx, f"🆕 Новый пользователь: {who(u)}" + (f"\nИсточник: {source}" if source else ""))
     if source in PAID_SOURCES:  # сюда Stripe переадресует после оплаты
         await show_paid(update.effective_chat.id, u, source, ctx)
+        return
+    if source in day.DEN_PAID:  # оплата «Мой день»
+        await day.on_paid(update.effective_chat.id, u, source, ctx)
+        return
+    if source == "den":  # ссылка t.me/ritm_goda_bot?start=den сразу открывает «Мой день»
+        await day.open_day(update.effective_chat.id, u.id, ctx)
         return
     if not is_new:
         caption = T.WELCOME_BACK.format(name=u.first_name or "")
@@ -777,6 +785,8 @@ async def post_init(app: Application):
         BotCommand("delete_me", "Удалить мои данные"),
     ])
     await schedule_reminders(app)
+    day.setup(db, pay_url, notify_admins)
+    await day.schedule_all(app)
     log.info("Бот запущен. Администраторы: %s", ADMIN_IDS or "не заданы!")
 
 
@@ -787,6 +797,8 @@ async def post_shutdown(app: Application):
 # ---------- свободные сообщения ----------
 async def on_private_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Бот не принимает вопросы: подсказываем написать в директ канала."""
+    if await day.on_text(update, ctx):
+        return
     if ctx.user_data.get("await_review"):
         await on_review_text(update, ctx)
         return
@@ -803,7 +815,9 @@ def build_app() -> Application:
                      ("webinar_add", webinar_add), ("webinar_link", webinar_link),
                      ("webinar_del", webinar_del), ("broadcast", broadcast), ("broadcast_unreg", broadcast_unreg),
                      ("send_registered", send_registered), ("regs", regs_cmd), ("prices", prices_cmd),
-                     ("reviews", reviews_cmd), ("consults", consults_cmd)]:
+                     ("reviews", reviews_cmd), ("consults", consults_cmd),
+                     ("den_access", lambda u, c: day.admin_access(u, c, is_admin)),
+                     ("den_stats", lambda u, c: day.admin_stats(u, c, is_admin))]:
         app.add_handler(CommandHandler(name, fn))
     app.add_handler(CallbackQueryHandler(on_guide, pattern="^guide$"))
     app.add_handler(CallbackQueryHandler(on_webinar, pattern="^webinar$"))
@@ -815,6 +829,7 @@ def build_app() -> Application:
     app.add_handler(CallbackQueryHandler(on_review_consent, pattern="^rv:"))
     app.add_handler(CallbackQueryHandler(on_review_write, pattern="^rvwrite$"))
     app.add_handler(CallbackQueryHandler(on_consult_choice, pattern="^cons:"))
+    app.add_handler(CallbackQueryHandler(day.on_cb, pattern="^den:"))
     app.add_handler(ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.Document.ALL, on_document))
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, on_private_message))

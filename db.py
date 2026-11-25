@@ -44,6 +44,60 @@ CREATE TABLE IF NOT EXISTS attended (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     reminded   BOOLEAN NOT NULL DEFAULT FALSE
 );
+CREATE TABLE IF NOT EXISTS day_users (
+    user_id     BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    name        TEXT,
+    bd          DATE,
+    morning     TEXT NOT NULL DEFAULT '07:00',
+    evening     TEXT NOT NULL DEFAULT '20:00',
+    grat        TEXT NOT NULL DEFAULT 'pm',
+    trial_until DATE,
+    paid_until  DATE,
+    plan_pdf    BOOLEAN NOT NULL DEFAULT FALSE,
+    active      BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS day_tasks (
+    user_id  BIGINT REFERENCES users(id) ON DELETE CASCADE,
+    day      DATE NOT NULL,
+    idx      INT NOT NULL,
+    text     TEXT NOT NULL,
+    done     BOOLEAN NOT NULL DEFAULT FALSE,
+    PRIMARY KEY (user_id, day, idx)
+);
+ALTER TABLE day_users ADD COLUMN IF NOT EXISTS paid_from DATE;
+ALTER TABLE day_users ADD COLUMN IF NOT EXISTS last_plan DATE;
+ALTER TABLE day_users ADD COLUMN IF NOT EXISTS plan_key TEXT;
+ALTER TABLE day_users ADD COLUMN IF NOT EXISTS fb_done BOOLEAN NOT NULL DEFAULT FALSE;
+CREATE TABLE IF NOT EXISTS day_goals (
+    user_id  BIGINT REFERENCES users(id) ON DELETE CASCADE,
+    period   DATE NOT NULL,
+    idx      INT NOT NULL,
+    text     TEXT NOT NULL,
+    done     BOOLEAN NOT NULL DEFAULT FALSE,
+    PRIMARY KEY (user_id, period, idx)
+);
+CREATE TABLE IF NOT EXISTS day_week (
+    user_id  BIGINT REFERENCES users(id) ON DELETE CASCADE,
+    week     DATE NOT NULL,
+    good     TEXT,
+    improve  TEXT,
+    energy   TEXT,
+    PRIMARY KEY (user_id, week)
+);
+CREATE TABLE IF NOT EXISTS day_feedback (
+    user_id     BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    liked       TEXT,
+    inconvenient TEXT,
+    recommend   TEXT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS day_log (
+    user_id  BIGINT REFERENCES users(id) ON DELETE CASCADE,
+    day      DATE NOT NULL,
+    grat     INT NOT NULL DEFAULT 0,
+    PRIMARY KEY (user_id, day)
+);
 CREATE TABLE IF NOT EXISTS consult_choice (
     user_id    BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
     product    TEXT,
@@ -72,6 +126,69 @@ class DB:
     async def close(self):
         if self.pool:
             await self.pool.close()
+
+    # --- «Мой день» ---
+    async def day_user(self, uid):
+        return await self.pool.fetchrow("SELECT * FROM day_users WHERE user_id=$1", uid)
+
+    async def day_create(self, uid):
+        await self.pool.execute("INSERT INTO day_users(user_id) VALUES($1) ON CONFLICT DO NOTHING", uid)
+
+    async def day_set(self, uid, **kw):
+        keys = list(kw)
+        sets = ", ".join(f"{k}=${i+2}" for i, k in enumerate(keys))
+        await self.pool.execute(f"UPDATE day_users SET {sets} WHERE user_id=$1", uid, *[kw[k] for k in keys])
+
+    async def day_active_users(self):
+        return await self.pool.fetch("SELECT * FROM day_users WHERE active AND bd IS NOT NULL")
+
+    async def day_all_users(self):
+        return await self.pool.fetch("SELECT * FROM day_users ORDER BY created_at")
+
+    async def day_tasks(self, uid, day):
+        return await self.pool.fetch("SELECT * FROM day_tasks WHERE user_id=$1 AND day=$2 ORDER BY idx", uid, day)
+
+    async def day_add_task(self, uid, day, idx, text):
+        await self.pool.execute("INSERT INTO day_tasks(user_id,day,idx,text) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING",
+                                uid, day, idx, text)
+
+    async def day_toggle(self, uid, day, idx):
+        await self.pool.execute("UPDATE day_tasks SET done = NOT done WHERE user_id=$1 AND day=$2 AND idx=$3", uid, day, idx)
+
+    async def day_goals(self, uid, period):
+        return await self.pool.fetch("SELECT * FROM day_goals WHERE user_id=$1 AND period=$2 ORDER BY idx", uid, period)
+
+    async def day_add_goal(self, uid, period, idx, text):
+        await self.pool.execute("INSERT INTO day_goals(user_id,period,idx,text) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING",
+                                uid, period, idx, text)
+
+    async def day_week_set(self, uid, week, **kw):
+        await self.pool.execute("INSERT INTO day_week(user_id,week) VALUES($1,$2) ON CONFLICT DO NOTHING", uid, week)
+        keys = list(kw)
+        sets = ", ".join(f"{k}=${i+3}" for i, k in enumerate(keys))
+        await self.pool.execute(f"UPDATE day_week SET {sets} WHERE user_id=$1 AND week=$2", uid, week, *[kw[k] for k in keys])
+
+    async def day_week_stats(self, uid, d1, d2):
+        t = await self.pool.fetchrow("SELECT count(*) AS n, count(*) FILTER (WHERE done) AS done FROM day_tasks "
+                                     "WHERE user_id=$1 AND day BETWEEN $2 AND $3", uid, d1, d2)
+        g = await self.pool.fetchval("SELECT coalesce(sum(grat),0) FROM day_log WHERE user_id=$1 AND day BETWEEN $2 AND $3", uid, d1, d2)
+        return t["n"], t["done"], g
+
+    async def day_fb_set(self, uid, **kw):
+        await self.pool.execute("INSERT INTO day_feedback(user_id) VALUES($1) ON CONFLICT DO NOTHING", uid)
+        keys = list(kw)
+        sets = ", ".join(f"{k}=${i+2}" for i, k in enumerate(keys))
+        await self.pool.execute(f"UPDATE day_feedback SET {sets} WHERE user_id=$1", uid, *[kw[k] for k in keys])
+
+    async def day_fb(self, uid):
+        return await self.pool.fetchrow("SELECT * FROM day_feedback WHERE user_id=$1", uid)
+
+    async def day_fb_all(self):
+        return await self.pool.fetch("SELECT f.*, d.name FROM day_feedback f LEFT JOIN day_users d USING(user_id) ORDER BY f.created_at")
+
+    async def day_grat(self, uid, day, n):
+        await self.pool.execute("""INSERT INTO day_log(user_id,day,grat) VALUES($1,$2,$3)
+                                   ON CONFLICT (user_id,day) DO UPDATE SET grat=EXCLUDED.grat""", uid, day, n)
 
     # --- пользователи ---
     async def upsert_user(self, uid, first_name, username, source=None):
