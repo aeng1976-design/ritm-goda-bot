@@ -536,7 +536,7 @@ def menu_kb(du):
         rows.append([Btn("🔄 Моё продление", callback_data="den:sub")])
     else:
         rows.append([Btn("💳 Продлить доступ", callback_data="den:offer")])
-    rows.append([Btn("⏸ Пауза сообщений" if du["active"] else "▶️ Возобновить", callback_data="den:pause")])
+    rows.append([Btn("⏸ Поставить сообщения на паузу" if du["active"] else "▶️ Включить сообщения снова", callback_data="den:pause")])
     return Kb(rows)
 
 
@@ -843,7 +843,8 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             n, p = day_energy(du["bd"], today())
             pre = (ZTXT + "\n\n") if today().day in ZERO else ""
             return await ctx.bot.send_message(chat, pre + f"Сегодня день <b>«{PLAIN[n]}»</b>: {DD.PD[p][0]}.\n\nХотите записать до 3 дел на сегодня? Каждое с новой строки.",
-                                              parse_mode="HTML", reply_markup=Kb([[Btn("Не сегодня", callback_data="den:noplan")]]))
+                                              parse_mode="HTML", reply_markup=Kb([[Btn("✍️ Записать сейчас", callback_data="den:now"),
+                                                                                   Btn("⏰ Напишу позже", callback_data="den:later")]]))
         if du["paid_until"] and du["bd"] and not du["last_plan"] and is_paid(du):
             # оплатили до регистрации: после регистрации сразу план
             schedule(ctx.application, du)
@@ -966,6 +967,15 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if st == "grat_then_plan":
             return await after_grat(ctx, uid, du)
         return
+    if act == "now":
+        ctx.user_data["den_st"] = "today_add"
+        await q.edit_message_reply_markup(None)
+        return await ctx.bot.send_message(chat, "Напишите до 3 дел на сегодня, каждое с новой строки ✍️")
+    if act == "later":
+        ctx.user_data.pop("den_st", None)
+        await q.edit_message_reply_markup(None)
+        return await ctx.bot.send_message(chat, "Хорошо 🌿 Записать дела можно в любой момент: «🌿 Мой день» → «📝 Дела на сегодня».\n"
+                                                "А вечером я сама спрошу про дела на завтра.")
     if act == "noplan":
         ctx.user_data.pop("den_st", None)
         return await q.edit_message_text("Хорошо 🌿 Отдыхайте!")
@@ -979,7 +989,7 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await db.day_set(uid, active=not du["active"])
         du = await db.day_user(uid)
         schedule(ctx.application, du)
-        return await ctx.bot.send_message(chat, "Сообщения на паузе. Вернуться можно в «Мой день»." if not du["active"] else "Сообщения снова включены ✅")
+        return await ctx.bot.send_message(chat, "⏸ Сообщения на паузе: утром и вечером я ничего не присылаю. Включить снова можно в «🌿 Мой день» → «▶️ Включить сообщения снова»." if not du["active"] else "Сообщения снова включены ✅")
 
 
 async def ask_fb3(ctx, chat):

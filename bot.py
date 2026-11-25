@@ -38,6 +38,7 @@ PRIVACY_URL = os.environ.get("PRIVACY_URL", "")
 PAY_URL_KIT = os.environ.get("PAY_URL_KIT", "")    # Stripe Payment Link: только план
 PAY_URL_FULL = os.environ.get("PAY_URL_FULL", "")  # Stripe Payment Link: план + консультация
 PAY_URL_PLUS = os.environ.get("PAY_URL_PLUS", "")  # Stripe Payment Link: план + консультация + сопровождение
+PAY_URL_KONS = os.environ.get("PAY_URL_KONS", "")  # Stripe Payment Link: консультация без плана
 # Ссылки по цене эфира (69 / 168 / 303 €); в боте включаются командой /prices webinar
 PAY_URL_KIT_WEB = os.environ.get("PAY_URL_KIT_WEB", "")
 PAY_URL_FULL_WEB = os.environ.get("PAY_URL_FULL_WEB", "")
@@ -114,7 +115,7 @@ async def notify_admins(ctx, text):
 
 # ---------- для всех ----------
 PAID_SOURCES = {"plan": "план", "konsult": "план + консультация",
-                "soprov": "план + консультация + сопровождение"}
+                "soprov": "план + консультация + сопровождение", "kons": "консультация без плана"}
 
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -179,6 +180,11 @@ async def show_paid(chat_id, u, source, ctx):
     await notify_admins(ctx, f"💳 После оплаты зашёл(зашла) в бота: {who(u)}\n"
                              f"Тариф: {PAID_SOURCES[source]} · Telegram ID: {u.id}\n"
                              f"(в Stripe это client_reference_id tg{u.id}; проверьте оплату)")
+    if source == "kons":  # только консультация: без плана, без бота на год, без гайда
+        await ctx.bot.send_message(chat_id, T.KONS_ASK, reply_markup=Kb([
+            [Btn(T.BTN_CONS_ALEX, callback_data="cons:kons:alex"), Btn(T.BTN_CONS_LUDA, callback_data="cons:kons:luda")],
+            [Btn(T.BTN_CONS_ANY, callback_data="cons:kons:any")]]))
+        return
     if source == "plan":
         await ctx.bot.send_message(chat_id, T.PAID_PLAN.format(confirm=T.ORDER_CONFIRM))
     else:
@@ -315,6 +321,8 @@ async def show_kit(chat_id, uid, ctx):
     for url, label, p in zip(links, labels, prices):
         if url:
             rows.append([Btn(label.format(p=p), url=pay_url(url, uid))])
+    if PAY_URL_KONS:
+        rows.append([Btn(T.BTN_BUY_KONS, url=pay_url(PAY_URL_KONS, uid))])
     info = T.KIT_INFO.format(p1=prices[0], p2=prices[1], p3=prices[2], web=T.WEB_NOTE if web else "")
     text = info if rows else info + "\n\n" + T.KIT_SOON
     rows.append([Btn(T.BTN_QUESTION, url=DIRECT_URL)])
