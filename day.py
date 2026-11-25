@@ -640,7 +640,7 @@ async def on_paid(chat_id, u, source, ctx):
         if not du["bd"]:
             ctx.user_data["den_st"] = "pdf_bd"
             await ctx.bot.send_message(chat_id, "Для расчёта нужна ваша дата рождения. Напишите её, пожалуйста, "
-                                                "например: 15.09.1975")
+                                                "в формате дд.мм.гггг")
         return
     # продление подряд: новый срок начинается на следующий день после старого
     cont = du["paid_until"] and du["paid_until"] >= d
@@ -865,7 +865,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if st == "name":
         await db.day_set(uid, name=text[:40])
         ctx.user_data["den_st"] = "bd"
-        await msg.reply_text("Ваша дата рождения? Например: 15.09.1975")
+        await msg.reply_text("Ваша дата рождения? Напишите в формате дд.мм.гггг")
         return True
     if st == "bd":
         m = BD_RE.match(text)
@@ -874,7 +874,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except ValueError:
             bd = None
         if not bd or not (1920 <= bd.year <= today().year - 14):
-            await msg.reply_text("Не поняла дату. Напишите так: 15.09.1975")
+            await msg.reply_text("Не поняла дату. Напишите в формате дд.мм.гггг")
             return True
         await db.day_set(uid, bd=bd)
         ctx.user_data.pop("den_st")
@@ -887,7 +887,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except ValueError:
             bd = None
         if not bd:
-            await msg.reply_text("Не поняла дату. Напишите так: 15.09.1975")
+            await msg.reply_text("Не поняла дату. Напишите в формате дд.мм.гггг")
             return True
         ctx.user_data.pop("den_st", None)
         await notify_admins(ctx, f"📄 Дата рождения для PDF: {update.effective_user.first_name} (ID {uid}): {bd:%d.%m.%Y}")
