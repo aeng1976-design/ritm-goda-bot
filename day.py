@@ -35,6 +35,11 @@ DEN_OPTIONS = [
 ]
 OPT = {k: dict(label=lab, months=mo, pdf=pdf, url=os.environ.get(u, ""),
                price=os.environ.get("PRICE_" + k.upper(), dflt)) for k, lab, mo, pdf, u, dflt in DEN_OPTIONS}
+# Месяц с автоматическим продлением (подписка Stripe)
+OPT["den_msub"] = dict(label="Месяц с автоматическим продлением", months=1, pdf=False,
+                       url=os.environ.get("PAY_URL_DEN_MSUB", ""), price=os.environ.get("PRICE_DEN_MSUB", "7,90"))
+STRIPE_KEY = os.environ.get("STRIPE_KEY", "")
+SUB_ON = bool(OPT["den_msub"]["url"] and STRIPE_KEY)
 DEN_PAID = set(OPT)
 # срок → (без PDF, с PDF)
 TERMS = [("m", "Месяц", "den_m", None), ("3m", "3 месяца", "den_3m", "den_3mp"),
@@ -388,8 +393,8 @@ async def goals_text(uid, period):
 # ---------- оплата ----------
 def offer_text():
     return ("Продолжим вместе? 🌿\n\n"
-            "Выберите срок. Это <b>разовая покупка</b>, без автоматических списаний: вы платите один раз, "
-            "а перед окончанием я напомню.\n\n"
+            "Выберите срок. 3 месяца, полгода и год: <b>разовая покупка</b>, без автоматических списаний, перед окончанием я напомню."
+            + (" Месяц можно оплатить разово или с <b>автоматическим продлением</b>." if SUB_ON else "") + "\n\n"
             "Каждый день: энергия дня, аффирмация, благодарности, 3 дела. Каждый месяц: подробный план с датами.\n"
             "Для 3 месяцев, полугода и года можно добавить личный план в PDF для печати.")
 
@@ -407,9 +412,13 @@ def offer_kb(uid):
 def term_msg(t, uid):
     _, lab, k, kp = next(x for x in TERMS if x[0] == t)
     if not kp:
-        return (f"<b>{lab}</b> · {OPT[k]['price']} €\nПосле оплаты вернитесь в бот, доступ откроется сразу.",
-                Kb([[Btn(f"Оплатить · {OPT[k]['price']} €", url=pay_url(OPT[k]["url"], uid))],
-                    [Btn("◀️ Назад", callback_data="den:offer")]]))
+        rows = [[Btn(f"💳 Разово · {OPT[k]['price']} €", url=pay_url(OPT[k]["url"], uid))]]
+        txt = f"<b>{lab}</b> · {OPT[k]['price']} €\n\n💳 <b>Разово</b>: платите один раз, без списаний. За 3 дня до конца я напомню."
+        if SUB_ON:
+            rows.append([Btn(f"🔄 Автоматически · {OPT['den_msub']['price']} € в месяц", callback_data="den:subinfo")])
+            txt += "\n🔄 <b>Автоматически</b>: продлевается каждый месяц, за 3 дня до списания я предупрежу, отменить можно в любой момент."
+        rows.append([Btn("◀️ Назад", callback_data="den:offer")])
+        return (txt + "\n\nПосле оплаты вернитесь в бот, доступ откроется сразу.", Kb(rows))
     rows = []
     if OPT[k]["url"]:
         rows.append([Btn(f"Без PDF · {OPT[k]['price']} €", url=pay_url(OPT[k]["url"], uid))])
@@ -422,6 +431,89 @@ def term_msg(t, uid):
             "После оплаты вернитесь в бот, доступ откроется сразу.", Kb(rows))
 
 
+SUB_INFO = ("🔄 <b>«Мой день» с автоматическим продлением</b>\n\n"
+            "• {price} € в месяц\n"
+            "• <b>продлевается автоматически</b> каждый месяц, пока вы его не отмените\n"
+            "• за 3 дня до списания я напомню: когда и сколько спишется\n"
+            "• отменить можно в любой момент: «Мой день» → «🔄 Моё продление». Оплаченный месяц остаётся до конца\n\n"
+            "Нажимая «Оформить», вы соглашаетесь на ежемесячное списание.")
+
+
+# ---------- Stripe: подписка на месяц ----------
+async def stripe(method, path, data=None, params=None):
+    import httpx
+    async with httpx.AsyncClient(timeout=20) as c:
+        r = await c.request(method, "https://api.stripe.com/v1/" + path, auth=(STRIPE_KEY, ""), data=data, params=params)
+        r.raise_for_status()
+        return r.json()
+
+
+def _period_end(sub):
+    pe = sub.get("current_period_end")
+    if not pe:
+        items = (sub.get("items") or {}).get("data") or []
+        pe = items[0].get("current_period_end") if items else None
+    return datetime.fromtimestamp(pe, BERLIN).date() if pe else None
+
+
+async def find_sub(uid):
+    """Ищет подписку человека по client_reference_id tg<ID> среди последних оплат."""
+    res = await stripe("GET", "checkout/sessions", params={"limit": 100, "status": "complete"})
+    for cs in res.get("data", []):
+        if cs.get("client_reference_id") == f"tg{uid}" and cs.get("subscription"):
+            return cs["subscription"]
+    return None
+
+
+async def stripe_job(ctx: ContextTypes.DEFAULT_TYPE):
+    """Раз в час: продления, отмены, напоминание за 3 дня до списания."""
+    if not STRIPE_KEY:
+        return
+    d = today()
+    for du in await db.day_all_users():
+        if du["plan_key"] != "den_msub" and not du["sub_id"]:
+            continue
+        uid = du["user_id"]
+        try:
+            sid = du["sub_id"] or await find_sub(uid)
+            if not sid:
+                continue
+            if sid != du["sub_id"]:
+                await db.day_set(uid, sub_id=sid)
+            sub = await stripe("GET", f"subscriptions/{sid}")
+        except Exception as e:
+            log.warning("Stripe для %s: %s", uid, e)
+            continue
+        st, pe, canc = sub.get("status"), _period_end(sub), bool(sub.get("cancel_at_period_end"))
+        if st in ("active", "trialing") and pe:
+            if not du["paid_until"] or pe > du["paid_until"]:
+                renewed = bool(du["paid_until"]) and du["paid_until"] < pe and du["sub_reminded"] is not None
+                await db.day_set(uid, paid_until=pe, sub_cancel=canc, active=True)
+                if renewed:
+                    await notify_admins(ctx, f"🔄 «Мой день»: продление {du['name']} (ID {uid}), {OPT['den_msub']['price']} €, до {pe:%d.%m.%Y}")
+                    await _send(ctx, uid, f"🔄 Подписка продлена до {pe:%d.%m.%Y}. Спасибо, что вы с нами 💛")
+            if canc != du["sub_cancel"]:
+                await db.day_set(uid, sub_cancel=canc)
+            if not canc and pe - d == timedelta(days=3) and du["sub_reminded"] != pe:
+                await db.day_set(uid, sub_reminded=pe)
+                await _send(ctx, uid, f"🔄 Через 3 дня, <b>{pe:%d.%m.%Y}</b>, подписка «Мой день» продлится на месяц, "
+                                      f"спишется <b>{OPT['den_msub']['price']} €</b>.\n\nЕсли всё в порядке, ничего делать не нужно.",
+                            Kb([[Btn("👍 Хорошо", callback_data="den:subok")], [Btn("Отменить продление", callback_data="den:subcancel")]]))
+        elif st in ("canceled", "unpaid", "incomplete_expired"):
+            await db.day_set(uid, sub_id=None, sub_cancel=False, plan_key="den_m")
+            await notify_admins(ctx, f"❌ «Мой день»: подписка {du['name']} (ID {uid}) закончилась ({st})")
+        elif st == "past_due":
+            await notify_admins(ctx, f"⚠️ «Мой день»: не прошло списание у {du['name']} (ID {uid}), Stripe попробует ещё раз")
+
+
+def sub_status_text(du):
+    if not du["sub_id"]:
+        return "🔄 Автоматическое продление ещё подключается, обычно это до часа. Загляните чуть позже."
+    if du["sub_cancel"]:
+        return f"🔄 Продление отменено. «Мой день» работает до {du['paid_until']:%d.%m.%Y}, дальше списаний не будет."
+    return f"🔄 Подписка активна: {OPT['den_msub']['price']} € в месяц. Следующее списание {du['paid_until']:%d.%m.%Y}."
+
+
 INTRO = (
     "🌿 <b>Мой день</b>\n\n"
     "Каждый день я помогаю жить в своём ритме, всего несколько минут:\n"
@@ -429,7 +521,7 @@ INTRO = (
     "• <b>3 благодарности</b> утром или вечером, как удобно;\n"
     "• <b>вечером</b> отметить, что получилось, и запланировать до 3 дел на завтра с учётом энергии дня.\n\n"
     "Сразу после регистрации покажу ваш год по четырём методам: личный год, задача года, Луна и Солнце, энергия.\n\n"
-    f"<b>Первые {TRIAL_DAYS} дней в подарок.</b> Потом можно продолжить на месяц, 3 месяца, полгода или год, без автоматических списаний.\n\n"
+    f"<b>Первые {TRIAL_DAYS} дней в подарок.</b> Потом можно продолжить на месяц, 3 месяца, полгода или год.\n\n"
     "Для расчётов я сохраню ваше имя, дату рождения, выбранное время, ваши дела и цели. Удалить всё можно в любой момент командой /delete_me."
 )
 
@@ -440,7 +532,10 @@ def menu_kb(du):
         rows.append([Btn("🗓 Мой месяц", callback_data="den:month"), Btn("📆 Эта неделя", callback_data="den:week")])
     rows.append([Btn("⏰ Время сообщений", callback_data="den:time"),
                  Btn("🙏 Благодарности: " + ("утром" if du["grat"] == "am" else "вечером"), callback_data="den:grat")])
-    rows.append([Btn("💳 Продлить доступ", callback_data="den:offer")])
+    if du["sub_id"] or du["plan_key"] == "den_msub":
+        rows.append([Btn("🔄 Моё продление", callback_data="den:sub")])
+    else:
+        rows.append([Btn("💳 Продлить доступ", callback_data="den:offer")])
     rows.append([Btn("⏸ Пауза сообщений" if du["active"] else "▶️ Возобновить", callback_data="den:pause")])
     return Kb(rows)
 
@@ -462,6 +557,8 @@ async def schedule_all(app):
     for du in rows:
         schedule(app, du)
     app.job_queue.run_daily(access_job, time=dtime(10, 0, tzinfo=BERLIN), name="den_access")
+    if STRIPE_KEY:
+        app.job_queue.run_repeating(stripe_job, interval=3600, first=120, name="den_stripe")
     log.info("«Мой день»: запланировано %d участниц", len(rows))
 
 
@@ -598,6 +695,8 @@ async def access_job(ctx: ContextTypes.DEFAULT_TYPE):
         uid = du["user_id"]
         paid = du["paid_until"]
         if paid and paid >= d - timedelta(days=1):
+            if du["sub_id"] and not du["sub_cancel"]:
+                continue  # подписка: напоминание присылает stripe_job
             if paid == d + timedelta(days=3):
                 await _send(ctx, uid, f"⏳ Через 3 дня, {paid:%d.%m}, заканчивается ваш доступ к «Мой день».\n\n" + offer_text(), offer_kb(uid))
             elif paid == d - timedelta(days=1):
@@ -653,6 +752,9 @@ async def on_paid(chat_id, u, source, ctx):
                              f"Доступ до {until:%d.%m.%Y}.\nПроверьте оплату в Stripe (client_reference_id tg{u.id})."
                              + ("\n📄 Нужно подготовить личный план PDF." if o["pdf"] else ""))
     txt = f"Спасибо! 💛 Тариф «{o['label']}» оплачен: доступ до {until:%d.%m.%Y}."
+    if source == "den_msub":
+        txt = (f"Спасибо! 💛 Подписка оформлена: {o['price']} € в месяц. Следующее списание примерно {until + timedelta(days=1):%d.%m.%Y}.\n"
+               "За 3 дня до списания я напомню. Отменить можно в любой момент: «Мой день» → «🔄 Моё продление».")
     if o["pdf"]:
         txt += "\n\nВаш личный план в PDF мы подготовим и пришлём сюда в течение 3 рабочих дней."
     await ctx.bot.send_message(chat_id, txt)
@@ -766,6 +868,37 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if act == "fb3":
         return await finish_fb(ctx, q, uid, parts[2])
 
+    if act == "subinfo":
+        return await ctx.bot.send_message(chat, SUB_INFO.format(price=OPT["den_msub"]["price"]), parse_mode="HTML",
+                                          reply_markup=Kb([[Btn(f"Оформить · {OPT['den_msub']['price']} € в месяц", url=pay_url(OPT["den_msub"]["url"], uid))],
+                                                           [Btn("◀️ Назад", callback_data="den:term:m")]]))
+    if act in ("sub", "subok", "subcancel", "subyes", "subresume") and du:
+        if act == "subok":
+            return await q.edit_message_reply_markup(None)
+        if act == "sub":
+            kb = None
+            if du["sub_id"]:
+                kb = Kb([[Btn("Возобновить продление", callback_data="den:subresume")]] if du["sub_cancel"]
+                        else [[Btn("Отменить продление", callback_data="den:subcancel")]])
+            return await ctx.bot.send_message(chat, sub_status_text(du), reply_markup=kb)
+        if act == "subcancel":
+            return await ctx.bot.send_message(chat, f"Точно отменить продление? «Мой день» останется до {du['paid_until']:%d.%m.%Y}, дальше списаний не будет.",
+                                              reply_markup=Kb([[Btn("Да, отменить", callback_data="den:subyes"), Btn("Нет, оставить", callback_data="den:subok")]]))
+        if not du["sub_id"]:
+            return await ctx.bot.send_message(chat, sub_status_text(du))
+        flag = "true" if act == "subyes" else "false"
+        try:
+            await stripe("POST", f"subscriptions/{du['sub_id']}", data={"cancel_at_period_end": flag})
+        except Exception as e:
+            log.warning("Stripe отмена %s: %s", uid, e)
+            await notify_admins(ctx, f"⚠️ Не получилось изменить подписку {du['name']} (ID {uid}) в Stripe, проверьте вручную")
+            return await ctx.bot.send_message(chat, "Не получилось связаться с оплатой. Мы уже получили сигнал и всё сделаем вручную 💛")
+        await db.day_set(uid, sub_cancel=(act == "subyes"))
+        if act == "subyes":
+            await notify_admins(ctx, f"❌ «Мой день»: {du['name']} (ID {uid}) отменила продление, доступ до {du['paid_until']:%d.%m.%Y}")
+            return await q.edit_message_text(f"Продление отменено ✅ Списаний больше не будет. «Мой день» работает до {du['paid_until']:%d.%m.%Y}. Вернуться можно в любой момент 🌿")
+        await notify_admins(ctx, f"🔄 «Мой день»: {du['name']} (ID {uid}) возобновила продление")
+        return await q.edit_message_text("Продление снова включено ✅")
     if not du or not du["bd"]:
         return await open_day(chat, uid, ctx)
     if act == "year":
