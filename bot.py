@@ -858,7 +858,8 @@ def build_app() -> Application:
                      ("send_registered", send_registered), ("regs", regs_cmd), ("prices", prices_cmd),
                      ("reviews", reviews_cmd), ("consults", consults_cmd),
                      ("den_access", lambda u, c: day.admin_access(u, c, is_admin)),
-                     ("den_stats", lambda u, c: day.admin_stats(u, c, is_admin))]:
+                     ("den_stats", lambda u, c: day.admin_stats(u, c, is_admin)),
+                     ("den_reset", lambda u, c: day.admin_reset(u, c, is_admin))]:
         app.add_handler(CommandHandler(name, fn))
     app.add_handler(CallbackQueryHandler(on_guide, pattern="^guide$"))
     app.add_handler(CallbackQueryHandler(on_webinar, pattern="^webinar$"))

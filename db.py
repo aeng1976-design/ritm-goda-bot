@@ -158,6 +158,10 @@ class DB:
     async def day_toggle(self, uid, day, idx):
         await self.pool.execute("UPDATE day_tasks SET done = NOT done WHERE user_id=$1 AND day=$2 AND idx=$3", uid, day, idx)
 
+    async def day_reset(self, uid):
+        for t in ("day_tasks", "day_goals", "day_week", "day_feedback", "day_log", "day_users"):
+            await self.pool.execute(f"DELETE FROM {t} WHERE user_id=$1", uid)
+
     async def day_goals(self, uid, period):
         return await self.pool.fetch("SELECT * FROM day_goals WHERE user_id=$1 AND period=$2 ORDER BY idx", uid, period)
 

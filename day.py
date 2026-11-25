@@ -1148,6 +1148,22 @@ async def admin_access(update: Update, ctx: ContextTypes.DEFAULT_TYPE, is_admin)
     await update.message.reply_text(f"Доступ для {uid} до {until:%d.%m.%Y} ✅")
 
 
+async def admin_reset(update: Update, ctx: ContextTypes.DEFAULT_TYPE, is_admin):
+    """/den_reset — начать «Мой день» заново (себе), /den_reset ID — другому человеку. Только для админов."""
+    if not is_admin(update):
+        return
+    try:
+        uid = int(ctx.args[0]) if ctx.args else update.effective_user.id
+    except ValueError:
+        return await update.message.reply_text("Формат: /den_reset или /den_reset 123456789")
+    for k in ("m", "e"):
+        for j in ctx.application.job_queue.get_jobs_by_name(f"den{k}{uid}"):
+            j.schedule_removal()
+    await db.day_reset(uid)
+    ctx.application.user_data.get(uid, {}).pop("den_st", None)
+    await update.message.reply_text(f"«Мой день» для {uid} сброшен ✅ Можно заново: /start → «🌿 Мой день».")
+
+
 async def admin_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE, is_admin):
     if not is_admin(update):
         return
