@@ -594,7 +594,7 @@ def morning_text(du, d, tasks):
                f"Сегодня день <b>«{PLAIN[n]}»</b>\n{first_sentence(DD.YARC[n][1])}\n"
                f"<b>Что делать:</b> {DD.PD[p][0]}.\n\n💛 <i>«{aff}»</i>\n\n💡 {DD.TIP[n]}")
     txt += (f"\n\n📝 <b>Ваши дела на сегодня:</b>\n{tasks}" if tasks else
-            "\n\n📝 Дел на сегодня нет. Хотите добавить? Нажмите «Дела на сегодня».")
+            "\n\n📝 Дел на сегодня пока нет. Нажмите «📝 Дела на сегодня», и я спрошу по одному.")
     return txt
 
 
@@ -665,14 +665,40 @@ async def ask_week(ctx, uid):
                 Kb([[Btn("Пропустить итог", callback_data="den:wkskip")]]))
 
 
+TASK_Q = {1: "1️⃣ Какое дело нужно сделать <b>в первую очередь</b>?",
+          2: "2️⃣ Какое дело нужно сделать <b>в течение дня</b>?",
+          3: "3️⃣ Какое дело можно сделать, <b>если хватит сил</b>?"}
+
+
+async def ask_task(ctx, uid, d, q):
+    """Задаёт вопрос q (1–3) про дела на день d. Пропускает уже записанные."""
+    ud = ctx.application.user_data[uid]
+    have = await db.day_tasks(uid, d)
+    if q > 3 or len(have) >= 3:
+        ud.pop("den_st", None)
+        return await task_summary(ctx, uid, d)
+    ud.update(den_st="task", den_td=d.isoformat(), den_q=q)
+    when = "сегодня" if d == today() else "завтра"
+    await _send(ctx, uid, TASK_Q[q] + f"\nНапишите одно дело на {when}.",
+                Kb([[Btn("Пропустить", callback_data="den:tskip"), Btn("Готово", callback_data="den:tdone")]]))
+
+
+async def task_summary(ctx, uid, d):
+    t = await tasks_text(uid, d)
+    when = "сегодня" if d == today() else "завтра"
+    if not t:
+        return await _send(ctx, uid, f"Хорошо 🌿 Дел на {when} нет. Записать можно в любой момент: «🌿 Мой день» → «📝 Дела на сегодня».")
+    await _send(ctx, uid, f"Записала на {when}:\n{t}\n\n" + ("Вечером отметим, что получилось 🌿" if when == "сегодня" else "Утром напомню 🌿"))
+
+
 async def ask_plan(ctx, uid, du):
     d = today() + timedelta(days=1)
     if not has_access(du, d):
         ctx.application.user_data[uid].pop("den_st", None)
         return await _send(ctx, uid, "Завтра заканчивается ваш доступ. Если хотите продолжить, нажмите «Продлить доступ» в «Мой день» 🌿")
-    ctx.application.user_data[uid]["den_st"] = "plan"
-    await _send(ctx, uid, f"🗓 {tomorrow_hint(du['bd'], d)}\n\nНапишите до 3 дел на завтра, каждое с новой строки.",
-                Kb([[Btn("Без планов на завтра", callback_data="den:noplan")]]))
+    ctx.application.user_data[uid].pop("den_st", None)
+    await _send(ctx, uid, f"🗓 {tomorrow_hint(du['bd'], d)}\n\nЗапишем до 3 дел на завтра?",
+                Kb([[Btn("✍️ Записать", callback_data="den:plan"), Btn("Без планов на завтра", callback_data="den:noplan")]]))
 
 
 async def done_kb(uid, d):
@@ -839,10 +865,10 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await ctx.bot.send_message(chat, f"Готово! 🎉 Пробная неделя до {du['trial_until']:%d.%m.%Y}.\n"
                                              f"Утром в {du['morning']} энергия дня и аффирмация, вечером в {du['evening']} отметки и план на завтра.")
             await ctx.bot.send_message(chat, year_text(du), parse_mode="HTML")
-            ctx.user_data["den_st"] = "today_add"
+            ctx.user_data.pop("den_st", None)
             n, p = day_energy(du["bd"], today())
             pre = (ZTXT + "\n\n") if today().day in ZERO else ""
-            return await ctx.bot.send_message(chat, pre + f"Сегодня день <b>«{PLAIN[n]}»</b>: {DD.PD[p][0]}.\n\nХотите записать до 3 дел на сегодня? Каждое с новой строки.",
+            return await ctx.bot.send_message(chat, pre + f"Сегодня день <b>«{PLAIN[n]}»</b>: {DD.PD[p][0]}.\n\nХотите записать до 3 дел на сегодня? Я спрошу по одному.",
                                               parse_mode="HTML", reply_markup=Kb([[Btn("✍️ Записать сейчас", callback_data="den:now"),
                                                                                    Btn("⏰ Напишу позже", callback_data="den:later")]]))
         if du["paid_until"] and du["bd"] and not du["last_plan"] and is_paid(du):
@@ -945,14 +971,14 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         mon = today() - timedelta(days=today().weekday())
         return await ctx.bot.send_message(chat, week_text(du, mon), parse_mode="HTML")
     if act == "today":
-        t = await tasks_text(uid, today())
-        ctx.user_data["den_st"] = "today_add"
-        if t:
-            await ctx.bot.send_message(chat, f"📝 Дела на сегодня:\n{t}", reply_markup=await done_kb(uid, today()))
-            if len(await db.day_tasks(uid, today())) >= 3:
-                ctx.user_data.pop("den_st", None)
-                return
-        return await ctx.bot.send_message(chat, "Напишите дела на сегодня, каждое с новой строки (всего не больше 3).")
+        ctx.user_data.pop("den_st", None)
+        rows = await db.day_tasks(uid, today())
+        if rows:
+            await ctx.bot.send_message(chat, "📝 Дела на сегодня. Нажмите на дело, чтобы отметить:", reply_markup=await done_kb(uid, today()))
+        if len(rows) < 3:
+            return await ctx.bot.send_message(chat, "Записать дела на сегодня? Я спрошу по одному." if not rows else "Можно добавить ещё дело.",
+                                              reply_markup=Kb([[Btn("✍️ Записать", callback_data="den:now")]]))
+        return
     if act == "done":
         d = datetime.strptime(parts[2], "%Y%m%d").date()
         await db.day_toggle(uid, d, int(parts[3]))
@@ -967,10 +993,17 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if st == "grat_then_plan":
             return await after_grat(ctx, uid, du)
         return
-    if act == "now":
-        ctx.user_data["den_st"] = "today_add"
+    if act in ("now", "plan"):
         await q.edit_message_reply_markup(None)
-        return await ctx.bot.send_message(chat, "Напишите до 3 дел на сегодня, каждое с новой строки ✍️")
+        return await ask_task(ctx, uid, today() + timedelta(days=1 if act == "plan" else 0), 1)
+    if act in ("tskip", "tdone"):
+        ud = ctx.user_data
+        d = date.fromisoformat(ud.get("den_td") or today().isoformat())
+        await q.edit_message_reply_markup(None)
+        if act == "tdone":
+            ud.pop("den_st", None)
+            return await task_summary(ctx, uid, d)
+        return await ask_task(ctx, uid, d, int(ud.get("den_q", 1)) + 1)
     if act == "later":
         ctx.user_data.pop("den_st", None)
         await q.edit_message_reply_markup(None)
@@ -1102,6 +1135,14 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text("На этот месяц уже есть 3 цели 🙂")
             return True
         await msg.reply_text("Записала цели месяца 🎯\n" + "\n".join(f"▫️ {t}" for t in items) + "\n\nНапомню о них в понедельник.")
+        return True
+    if st == "task":
+        d = date.fromisoformat(ctx.user_data.get("den_td") or today().isoformat())
+        q = int(ctx.user_data.get("den_q", 1))
+        have = await db.day_tasks(uid, d)
+        if len(have) < 3:
+            await db.day_add_task(uid, d, len(have) + 1, text.strip()[:80])
+        await ask_task(ctx, uid, d, q + 1)
         return True
     if st in ("plan", "today_add"):
         d = today() + timedelta(days=1) if st == "plan" else today()
