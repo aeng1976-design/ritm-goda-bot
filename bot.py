@@ -601,23 +601,50 @@ async def prices_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     mode = (ctx.args[0].lower() if ctx.args else "")
     if mode not in ("webinar", "regular"):
         cur = await db.get_setting("prices", "regular")
+        until = await db.get_setting("prices_until", "")
+        extra = ""
+        if cur == "webinar" and until:
+            extra = f" до {datetime.fromisoformat(until).astimezone(BERLIN):%d.%m в %H:%M}, потом бот сам вернёт обычные"
         await update.message.reply_text(
-            f"Сейчас в боте: {'цены эфира' if cur == 'webinar' else 'обычные цены'}.\n"
-            "Формат: /prices webinar или /prices regular")
+            f"Сейчас в боте: {'цены эфира' if cur == 'webinar' else 'обычные цены'}{extra}.\n"
+            "Формат: /prices webinar (на 48 часов), /prices webinar 24 (на 24 часа) или /prices regular")
         return
     if mode == "webinar" and not (PAY_URL_KIT_WEB and PAY_URL_FULL_WEB and PAY_URL_PLUS_WEB):
         await update.message.reply_text("Не заданы ссылки PAY_URL_KIT_WEB, PAY_URL_FULL_WEB, PAY_URL_PLUS_WEB в Render.")
         return
     await db.set_setting("prices", mode)
     if mode == "webinar":
+        try:
+            hours = int(ctx.args[1]) if len(ctx.args) > 1 else 48
+        except ValueError:
+            hours = 48
+        until = datetime.now(BERLIN) + timedelta(hours=hours)
+        await db.set_setting("prices_until", until.isoformat())
         await update.message.reply_text(
             "✅ В боте цены эфира: 69 / 168 / 303 €.\n"
-            "Не забудьте включить три ссылки по цене эфира в Stripe и выключить их через 48 часов, "
-            "а затем отправить /prices regular.")
+            f"{until:%d.%m в %H:%M} бот сам вернёт обычные цены и напишет вам.\n"
+            "Не забудьте включить три ссылки по цене эфира в Stripe.")
     else:
+        await db.set_setting("prices_until", "")
         await update.message.reply_text(
             "✅ В боте обычные цены: 89 / 213 / 402 €.\n"
-            "Проверьте, что ссылки по цене эфира в Stripe выключены.")
+            "Ссылки по цене эфира в Stripe можно выключить.")
+
+
+async def prices_job(ctx: ContextTypes.DEFAULT_TYPE):
+    """Каждые 10 минут: если время цен эфира прошло, вернуть обычные цены."""
+    try:
+        if (await db.get_setting("prices", "regular")) != "webinar":
+            return
+        until = await db.get_setting("prices_until", "")
+        if not until or datetime.now(BERLIN) < datetime.fromisoformat(until):
+            return
+        await db.set_setting("prices", "regular")
+        await db.set_setting("prices_until", "")
+        await notify_admins(ctx, "⏰ 48 часов прошли: в боте снова обычные цены 89 / 213 / 402 €.\n"
+                                 "Выключите три ссылки по цене эфира в Stripe.")
+    except Exception as e:
+        log.warning("prices_job: %s", e)
 
 
 async def reviews_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -787,6 +814,7 @@ async def post_init(app: Application):
     await schedule_reminders(app)
     day.setup(db, pay_url, notify_admins)
     await day.schedule_all(app)
+    app.job_queue.run_repeating(prices_job, interval=600, first=60, name="prices")
     log.info("Бот запущен. Администраторы: %s", ADMIN_IDS or "не заданы!")
 
 
