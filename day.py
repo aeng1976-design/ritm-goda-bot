@@ -1222,7 +1222,8 @@ async def admin_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE, is_admin):
             st = f"проба до {r['trial_until']:%d.%m}"
         else:
             st = "без доступа"
-        lines.append(f"• {r['name']} (ID {r['user_id']}) · {st}" + (" · 📄 нужен PDF" if r["plan_pdf"] else ""))
+        reg_at = r["created_at"].astimezone(BERLIN).strftime("%d.%m %H:%M") if r["created_at"] else "?"
+        lines.append(f"• {r['name']} (ID {r['user_id']}) · с {reg_at} · {st}" + (" · 📄 нужен PDF" if r["plan_pdf"] else ""))
     pdf_only = [r for r in rows if r["plan_pdf"] and not r["bd"]]
     for r in pdf_only:
         lines.append(f"• ID {r['user_id']} · 📄 только PDF (дата рождения в уведомлении)")
