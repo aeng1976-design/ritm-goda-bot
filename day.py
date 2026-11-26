@@ -528,7 +528,8 @@ INTRO = (
 
 
 def menu_kb(du):
-    rows = [[Btn("📅 Мой год", callback_data="den:year"), Btn("📝 Дела на сегодня", callback_data="den:today")]]
+    rows = [[Btn("📅 Мой год", callback_data="den:year"), Btn("📝 Дела на сегодня", callback_data="den:today")],
+            [Btn("📋 Мои дела", callback_data="den:tasks:0"), Btn("🙏 Мои благодарности", callback_data="den:grats:0")]]
     if is_paid(du):
         rows.append([Btn("🗓 Мой месяц", callback_data="den:month"), Btn("📆 Эта неделя", callback_data="den:week")])
     rows.append([Btn("⏰ Время сообщений", callback_data="den:time"),
@@ -621,8 +622,10 @@ async def morning_job(ctx: ContextTypes.DEFAULT_TYPE):
     ps = period_start(du, d)
     if ps == d and du["last_plan"] != d:
         await send_period_plan(ctx, uid, du, d)
-    # понедельник: обзор недели
+    # понедельник: итог прошлой недели по делам и обзор новой недели
     if d.weekday() == 0:
+        await _send(ctx, uid, (await weekly_tasks_report(uid, d - timedelta(days=7)))[:4000],
+                    Kb([[Btn("📋 Мои дела", callback_data="den:tasks:0"), Btn("🙏 Мои благодарности", callback_data="den:grats:0")]]))
         txt = week_text(du, d)
         ps = period_start(du, d)
         g = await goals_text(uid, ps) if ps else None
@@ -700,6 +703,149 @@ async def ask_plan(ctx, uid, du):
     ctx.application.user_data[uid].pop("den_st", None)
     await _send(ctx, uid, f"🗓 {tomorrow_hint(du['bd'], d)}\n\nЗапишем до 3 дел на завтра?",
                 Kb([[Btn("✍️ Записать", callback_data="den:plan"), Btn("Без планов на завтра", callback_data="den:noplan")]]))
+
+
+PRIO = {1: "1️⃣", 2: "2️⃣", 3: "3️⃣"}
+
+
+def day_name(d):
+    t = today()
+    if d == t + timedelta(days=1):
+        return "Завтра"
+    if d == t:
+        return "Сегодня"
+    if d == t - timedelta(days=1):
+        return "Вчера"
+    return WDs[d.weekday()]
+
+
+def task_line(r):
+    p = r["prio"] if "prio" in r.keys() and r["prio"] else r["idx"]
+    return ("✅ " if r["done"] else "▫️ ") + PRIO.get(p, "") + " " + r["text"]
+
+
+async def tasks_week_text(uid, off=0):
+    """Дела по 7 дней, от новых к старым; off — сдвиг назад в днях. Внизу итог за всё время."""
+    t0 = today() - timedelta(days=off)
+    d_hi = t0 + timedelta(days=1) if off == 0 else t0
+    d_lo = t0 - timedelta(days=6)
+    rows = await db.day_tasks_range(uid, d_lo, d_hi)
+    by = {}
+    for r in rows:
+        by.setdefault(r["day"], []).append(r)
+    blocks = [f"<b>{day_name(d)}, {d.day} {MNg[d.month]}</b>\n" + "\n".join(task_line(r) for r in by[d])
+              for d in sorted(by, reverse=True)]
+    past = [r for r in rows if r["day"] <= today()]
+    head = f"📋 <b>Мои дела с {d_lo.day} {MNg[d_lo.month]} по {d_hi.day} {MNg[d_hi.month]}</b>"
+    body = "\n\n".join(blocks) if blocks else "За эти дни дел не было."
+    if past:
+        body += f"\n\nЗа эти дни сделано {sum(1 for r in past if r['done'])} из {len(past)}"
+    tot = await db.day_tasks_total(uid, today())
+    if tot["n"]:
+        body += f"\n📊 За всё время: сделано {tot['done']} из {tot['n']} ({round(100 * tot['done'] / tot['n'])}%)"
+    return head + "\n\n" + body + "\n\n1️⃣ главное · 2️⃣ в течение дня · 3️⃣ если хватит сил"
+
+
+async def grats_week_text(uid, off=0):
+    t0 = today() - timedelta(days=off)
+    d_lo = t0 - timedelta(days=6)
+    rows = await db.day_grat_range(uid, d_lo, t0)
+    by = {}
+    for r in rows:
+        by.setdefault(r["day"], []).append(r["text"])
+    head = f"🙏 <b>Мои благодарности с {d_lo.day} {MNg[d_lo.month]} по {t0.day} {MNg[t0.month]}</b>"
+    blocks = [f"<b>{day_name(d)}, {d.day} {MNg[d.month]}</b>\n" + "\n".join("• " + x for x in by[d]) for d in sorted(by, reverse=True)]
+    body = "\n\n".join(blocks) if blocks else "За эти дни благодарностей не было."
+    tot = await db.day_grat_total(uid)
+    if tot:
+        body += f"\n\n💛 Всего благодарностей: {tot}"
+    return head + "\n\n" + body
+
+
+async def history_nav(kind, uid, off):
+    first = await (db.day_tasks_first(uid) if kind == "tasks" else db.day_grat_first(uid))
+    nav = []
+    if first and first < today() - timedelta(days=off + 6):
+        nav.append(Btn("◀️ Раньше", callback_data=f"den:{kind}:{off + 7}"))
+    if off > 0:
+        nav.append(Btn("Позже ▶️", callback_data=f"den:{kind}:{max(off - 7, 0)}"))
+    return Kb([nav]) if nav else None
+
+
+async def weekly_tasks_report(uid, mon):
+    """Подробный итог недели по делам (понедельник–воскресенье, начиная с mon)."""
+    sun = mon + timedelta(days=6)
+    rows = await db.day_tasks_range(uid, mon, sun)
+    rng = f"{mon.day} {MNg[mon.month]} – {sun.day} {MNg[sun.month]}"
+    if not rows:
+        return (f"📊 <b>Итог недели по делам · {rng}</b>\n\nНа прошлой неделе дел не было записано. "
+                "Попробуйте начать с одного главного дела в день: так легче увидеть свой ритм 🌿")
+    n, done = len(rows), sum(1 for r in rows if r["done"])
+    pct = round(100 * done / n)
+    L = [f"📊 <b>Итог недели по делам · {rng}</b>", "", f"Запланировано <b>{n}</b>, сделано <b>{done}</b> ({pct}%)."]
+    # по важности
+    pr = {}
+    for r in rows:
+        p = r["prio"] or r["idx"]
+        a = pr.setdefault(p, [0, 0]); a[0] += 1; a[1] += r["done"]
+    names = {1: "главные дела", 2: "дела в течение дня", 3: "«если хватит сил»"}
+    L += ["", "<b>По важности</b>"] + [f"{PRIO[p]} {cap(names[p])}: {pr[p][1]} из {pr[p][0]}" for p in sorted(pr) if p in names]
+    # по дням
+    days = {}
+    for r in rows:
+        a = days.setdefault(r["day"], [0, 0]); a[0] += 1; a[1] += r["done"]
+    best = max(days.items(), key=lambda x: (x[1][1] / x[1][0], x[1][0]))
+    worst = min(days.items(), key=lambda x: (x[1][1] / x[1][0], -x[1][0]))
+    empty = [WDs[i] for i in range(7) if mon + timedelta(days=i) not in days]
+    L += ["", "<b>По дням</b>", f"Лучший день: {WDl[best[0].weekday()]} ({best[1][1]} из {best[1][0]})"]
+    if worst[0] != best[0] and worst[1][1] < worst[1][0]:
+        L.append(f"Труднее всего: {WDl[worst[0].weekday()]} ({worst[1][1]} из {worst[1][0]})")
+    if empty:
+        L.append("Дни без плана: " + ", ".join(empty))
+    # сравнение с прошлой неделей
+    prev = await db.day_tasks_range(uid, mon - timedelta(days=7), mon - timedelta(days=1))
+    if prev:
+        pp = round(100 * sum(1 for r in prev if r["done"]) / len(prev))
+        arrow = "↑ лучше" if pct > pp else ("↓ меньше" if pct < pp else "так же")
+        L.append(f"Неделей раньше: {pp}%, сейчас {pct}% ({arrow})")
+    # что откладывается
+    month = await db.day_tasks_range(uid, sun - timedelta(days=27), sun)
+    cnt = {}
+    for r in month:
+        if not r["done"]:
+            k = r["text"].strip().lower()
+            cnt[k] = (cnt.get(k, (0, r["text"]))[0] + 1, r["text"])
+    this_undone = {r["text"].strip().lower() for r in rows if not r["done"]}
+    rep_ = [(c, t) for k, (c, t) in cnt.items() if c >= 2 and k in this_undone]
+    raz = lambda c: "раза" if c % 10 in (2, 3, 4) and c % 100 not in (12, 13, 14) else "раз"
+    undone = [r for r in rows if not r["done"]]
+    if undone:
+        L += ["", "<b>Не сделано</b>"] + [f"▫️ {r['text']} ({WDs[r['day'].weekday()]})" for r in undone]
+    if rep_:
+        L += ["", "<b>🔁 Откладывается не первый раз</b>"] + [f"• {t}: не сделано {c} {raz(c)} за 4 недели" for c, t in sorted(rep_, reverse=True)[:5]]
+    # вывод
+    p1 = pr.get(1, [0, 0]); p3 = pr.get(3, [0, 0])
+    if rep_:
+        tip = "Если дело откладывается снова и снова, разбейте его на маленький первый шаг на 10 минут или спросите себя, нужно ли оно вам на самом деле."
+    elif p1[0] and p1[1] / p1[0] < 0.6:
+        tip = "Главные дела часто не доходят до конца. Попробуйте ставить одно главное дело и делать его в первой половине дня."
+    elif pct >= 80:
+        tip = "Отличная неделя! Вы хорошо чувствуете свои силы. Можно чуть смелее ставить главное дело."
+    elif p3[0] and p3[1] / p3[0] < 0.5 and p1[0] and p1[1] / p1[0] >= 0.6:
+        tip = "Главное вы делаете, а третье дело часто остаётся. Это нормально: оно и есть «если хватит сил», не ругайте себя за него."
+    else:
+        tip = "Посмотрите, в какие дни дела шли легче, и планируйте важное на похожие дни. В обзоре недели видно, для чего подходит каждый день."
+    L += ["", f"💡 {tip}"]
+    g = await db.day_grat_range(uid, mon, sun)
+    if g:
+        L.append(f"🙏 Благодарностей за неделю: {len(g)}")
+    L += ["", "<b>Все дела недели</b>"]
+    by = {}
+    for r in rows:
+        by.setdefault(r["day"], []).append(r)
+    for d in sorted(by):
+        L.append(f"<b>{WDs[d.weekday()]} {d.day}</b>: " + " · ".join(("✅ " if r["done"] else "▫️ ") + r["text"] for r in by[d]))
+    return "\n".join(L)
 
 
 async def done_kb(uid, d):
@@ -973,6 +1119,10 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if act == "week":
         mon = today() - timedelta(days=today().weekday())
         return await ctx.bot.send_message(chat, week_text(du, mon), parse_mode="HTML")
+    if act in ("tasks", "grats"):
+        off = int(parts[2]) if len(parts) > 2 else 0
+        txt = await (tasks_week_text(uid, off) if act == "tasks" else grats_week_text(uid, off))
+        return await ctx.bot.send_message(chat, txt[:4000], parse_mode="HTML", reply_markup=await history_nav(act, uid, off))
     if act == "today":
         ctx.user_data.pop("den_st", None)
         rows = await db.day_tasks(uid, today())
@@ -1108,7 +1258,9 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data.pop("den_st", None)
         return False
     if st in ("grat", "grat_then_plan"):
-        n = max(1, min(3, len([l for l in re.split(r"[\n;]+", text) if l.strip()])))
+        items = [l.strip(" -•–\t")[:300] for l in re.split(r"[\n;]+", text) if l.strip(" -•–\t")] or [text[:300]]
+        await db.day_grat_add(uid, today(), items[:10])
+        n = max(1, min(3, len(items)))
         await db.day_grat(uid, today(), n)
         await msg.reply_text("Спасибо 🙏 Благодарность меняет фокус на хорошее.")
         if st == "grat_then_plan":
@@ -1146,7 +1298,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         q = int(ctx.user_data.get("den_q", 1))
         have = await db.day_tasks(uid, d)
         if len(have) < 3:
-            await db.day_add_task(uid, d, len(have) + 1, text.strip()[:80])
+            await db.day_add_task(uid, d, len(have) + 1, text.strip()[:80], prio=q)
         await ask_task(ctx, uid, d, q + 1)
         return True
     if st in ("plan", "today_add"):

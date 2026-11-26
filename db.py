@@ -65,6 +65,15 @@ CREATE TABLE IF NOT EXISTS day_tasks (
     done     BOOLEAN NOT NULL DEFAULT FALSE,
     PRIMARY KEY (user_id, day, idx)
 );
+ALTER TABLE day_tasks ADD COLUMN IF NOT EXISTS prio INT;
+CREATE TABLE IF NOT EXISTS day_gratitude (
+    id         BIGSERIAL PRIMARY KEY,
+    user_id    BIGINT REFERENCES users(id) ON DELETE CASCADE,
+    day        DATE NOT NULL,
+    text       TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS day_gratitude_user ON day_gratitude(user_id, day);
 ALTER TABLE day_users ADD COLUMN IF NOT EXISTS paid_from DATE;
 ALTER TABLE day_users ADD COLUMN IF NOT EXISTS last_plan DATE;
 ALTER TABLE day_users ADD COLUMN IF NOT EXISTS plan_key TEXT;
@@ -181,16 +190,41 @@ class DB:
     async def day_tasks(self, uid, day):
         return await self.pool.fetch("SELECT * FROM day_tasks WHERE user_id=$1 AND day=$2 ORDER BY idx", uid, day)
 
-    async def day_add_task(self, uid, day, idx, text):
-        await self.pool.execute("INSERT INTO day_tasks(user_id,day,idx,text) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING",
-                                uid, day, idx, text)
+    async def day_add_task(self, uid, day, idx, text, prio=None):
+        await self.pool.execute("INSERT INTO day_tasks(user_id,day,idx,text,prio) VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING",
+                                uid, day, idx, text, prio)
+
+    async def day_tasks_range(self, uid, d1, d2):
+        return await self.pool.fetch("SELECT * FROM day_tasks WHERE user_id=$1 AND day BETWEEN $2 AND $3 ORDER BY day, idx",
+                                     uid, d1, d2)
+
+    async def day_tasks_first(self, uid):
+        return await self.pool.fetchval("SELECT min(day) FROM day_tasks WHERE user_id=$1", uid)
+
+    async def day_tasks_total(self, uid, until):
+        return await self.pool.fetchrow("SELECT count(*) AS n, count(*) FILTER (WHERE done) AS done FROM day_tasks "
+                                        "WHERE user_id=$1 AND day <= $2", uid, until)
+
+    async def day_grat_add(self, uid, day, texts):
+        for t in texts:
+            await self.pool.execute("INSERT INTO day_gratitude(user_id,day,text) VALUES($1,$2,$3)", uid, day, t)
+
+    async def day_grat_range(self, uid, d1, d2):
+        return await self.pool.fetch("SELECT * FROM day_gratitude WHERE user_id=$1 AND day BETWEEN $2 AND $3 ORDER BY day, id",
+                                     uid, d1, d2)
+
+    async def day_grat_first(self, uid):
+        return await self.pool.fetchval("SELECT min(day) FROM day_gratitude WHERE user_id=$1", uid)
+
+    async def day_grat_total(self, uid):
+        return await self.pool.fetchval("SELECT count(*) FROM day_gratitude WHERE user_id=$1", uid)
 
     async def day_toggle(self, uid, day, idx):
         await self.pool.execute("UPDATE day_tasks SET done = NOT done WHERE user_id=$1 AND day=$2 AND idx=$3", uid, day, idx)
 
     async def day_reset(self, uid):
         await self.ev(uid, "den_reset")
-        for t in ("day_tasks", "day_goals", "day_week", "day_feedback", "day_log", "day_users"):
+        for t in ("day_tasks", "day_goals", "day_week", "day_feedback", "day_log", "day_gratitude", "day_users"):
             await self.pool.execute(f"DELETE FROM {t} WHERE user_id=$1", uid)
 
     async def day_goals(self, uid, period):
